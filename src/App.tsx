@@ -23,7 +23,11 @@ import {
   Clock,
   ArrowRight,
   ChevronRight,
-  Info
+  Info,
+  User as UserIcon,
+  Cloud,
+  LogIn,
+  LogOut
 } from "lucide-react";
 import { TripRecord, FuelRecord, CalculationResults, AIAnalysisResponse, StateResult, UnitCalculatedData } from "./types";
 import { IFTA_RATES, STATE_NAMES, QUARTERS, SAMPLE_FUEL_CARD } from "./data";
@@ -37,12 +41,168 @@ import ReceiptScanner from "./components/ReceiptScanner";
 import SmartColumnMapper from "./components/SmartColumnMapper";
 import FleetAnalytics from "./components/FleetAnalytics";
 
+// Firebase Integration imports
+import { 
+  auth, 
+  db, 
+  googleProvider, 
+  signInWithPopup, 
+  signOut, 
+  OperationType, 
+  handleFirestoreError 
+} from "./firebase";
+import { 
+  doc, 
+  setDoc, 
+  addDoc,
+  collection, 
+  onSnapshot, 
+  writeBatch, 
+  serverTimestamp, 
+  getDocs,
+  getDocFromServer
+} from "firebase/firestore";
+
 export default function App() {
   const [tab, setTab] = useState<string>("dashboard");
   const [quarter, setQuarter] = useState<string>("Q2 2026");
   const [trips, setTrips] = useState<TripRecord[]>([]);
   const [fuel, setFuel] = useState<FuelRecord[]>([]);
   const [results, setResults] = useState<CalculationResults | null>(null);
+
+  // Firebase auth & synchronizer state hooks
+  const [user, setUser] = useState<any>(null);
+  const [authLoading, setAuthLoading] = useState<boolean>(true);
+
+  // Robust chunked cloud batch writer to prevent Firebase 500 limit violations
+  const writeBatchChunked = async (userUid: string, collectionName: "trips" | "fuel", records: any[]) => {
+    const chunks = [];
+    for (let i = 0; i < records.length; i += 400) {
+      chunks.push(records.slice(i, i + 400));
+    }
+    for (const chunk of chunks) {
+      const batch = writeBatch(db);
+      chunk.forEach((row) => {
+        const docRef = doc(collection(db, "users", userUid, collectionName));
+        batch.set(docRef, {
+          unit: row.unit || "Unknown",
+          state: (row.state || "TX").toUpperCase().slice(0, 2),
+          miles: row.miles ? String(row.miles) : undefined,
+          gallons: row.gallons ? String(row.gallons) : undefined,
+          date: row.date || new Date().toISOString().split("T")[0],
+          vendor: row.vendor || undefined,
+          price_per_gal: row.price_per_gal !== undefined ? Number(row.price_per_gal) : undefined,
+          createdAt: serverTimestamp()
+        });
+      });
+      await batch.commit();
+    }
+  };
+
+  // Listen to Auth State changes & self-register users under /users/{uid}
+  useEffect(() => {
+    const unsubscribe = auth.onAuthStateChanged(async (currentUser) => {
+      setUser(currentUser);
+      setAuthLoading(false);
+      
+      if (currentUser) {
+        try {
+          const userDocRef = doc(db, "users", currentUser.uid);
+          const userDoc = await getDocFromServer(userDocRef).catch(() => null);
+          
+          if (!userDoc || !userDoc.exists()) {
+            await setDoc(userDocRef, {
+              email: currentUser.email || "",
+              displayName: currentUser.displayName || currentUser.email?.split("@")[0] || "User",
+              createdAt: serverTimestamp(),
+              updatedAt: serverTimestamp()
+            });
+          }
+        } catch (error) {
+          console.error("Auto registration synced error: ", error);
+        }
+      }
+    });
+
+    return () => unsubscribe();
+  }, []);
+
+  // Sync state with cloud database in real-time if signed in
+  useEffect(() => {
+    if (!user) {
+      // In guest sandbox mode, do not register snapshot observers, keeping existing loaded state
+      return;
+    }
+
+    const tripsCol = collection(db, "users", user.uid, "trips");
+    const unsubscribeTrips = onSnapshot(tripsCol, (snapshot) => {
+      const loadedTrips: TripRecord[] = [];
+      snapshot.forEach((doc) => {
+        const d = doc.data();
+        loadedTrips.push({
+          id: doc.id,
+          unit: d.unit || "N/A",
+          state: d.state || "TX",
+          miles: d.miles !== undefined ? d.miles : "0",
+          date: d.date || ""
+        } as TripRecord);
+      });
+      setTrips(loadedTrips);
+    }, (error) => {
+      handleFirestoreError(error, OperationType.LIST, `users/${user.uid}/trips`);
+    });
+
+    const fuelCol = collection(db, "users", user.uid, "fuel");
+    const unsubscribeFuel = onSnapshot(fuelCol, (snapshot) => {
+      const loadedFuel: FuelRecord[] = [];
+      snapshot.forEach((doc) => {
+        const d = doc.data();
+        loadedFuel.push({
+          id: doc.id,
+          unit: d.unit || "N/A",
+          state: d.state || "TX",
+          gallons: d.gallons !== undefined ? d.gallons : "0",
+          date: d.date || "",
+          vendor: d.vendor || "Standard Terminal",
+          price_per_gal: d.price_per_gal !== undefined ? d.price_per_gal : 3.45
+        } as FuelRecord);
+      });
+      setFuel(loadedFuel);
+    }, (error) => {
+      handleFirestoreError(error, OperationType.LIST, `users/${user.uid}/fuel`);
+    });
+
+    return () => {
+      unsubscribeTrips();
+      unsubscribeFuel();
+    };
+  }, [user]);
+
+  // Auth Operations
+  const handleSignIn = async () => {
+    try {
+      await signInWithPopup(auth, googleProvider);
+      triggerToast("Signed in successfully!", "ok");
+    } catch (error: any) {
+      triggerToast("Google sign-in abort or error: " + error.message, "err");
+    }
+  };
+
+  const handleSignOut = async () => {
+    try {
+      await signOut(auth);
+      setTrips([]);
+      setFuel([]);
+      setResults(null);
+      setAnomalies(null);
+      setFuelCardLoaded(false);
+      setUploadMsg({ trip: "", fuel: "" });
+      triggerToast("Signed out. Reverted to local Guest sandbox.", "ok");
+    } catch (error: any) {
+      triggerToast("Google sign-out failed: " + error.message, "err");
+    }
+  };
+
   const [activeUnit, setActiveUnit] = useState<string>("all");
   const [toast, setToast] = useState<{ msg: string; type: "ok" | "err" } | null>(null);
   const [fuelCardLoaded, setFuelCardLoaded] = useState<boolean>(false);
@@ -87,25 +247,44 @@ export default function App() {
   };
 
   // Safe manual addition helper (used by OCR and Optimizer results)
-  const handleAddFuelDirect = (record: { date: string; unit: string; state: string; gallons: string; vendor: string }) => {
-    const freshFuel: FuelRecord = {
-      date: record.date || new Date().toISOString().split("T")[0],
-      unit: record.unit,
-      state: record.state.toUpperCase(),
-      gallons: record.gallons,
-      vendor: record.vendor,
-      price_per_gal: 3.45
-    };
-    const nextFuel = [...fuel, freshFuel];
-    setFuel(nextFuel);
-    
-    if (trips.length > 0) {
-      const calculation = calculateIFTA(trips, nextFuel);
-      setResults(calculation);
+  const handleAddFuelDirect = async (record: { date: string; unit: string; state: string; gallons: string; vendor: string }) => {
+    if (user) {
+      try {
+        const fuelCol = collection(db, "users", user.uid, "fuel");
+        await addDoc(fuelCol, {
+          unit: record.unit,
+          state: record.state.toUpperCase().slice(0, 2),
+          gallons: String(record.gallons),
+          date: record.date || new Date().toISOString().split("T")[0],
+          vendor: record.vendor || "Standard Terminal",
+          price_per_gal: 3.45,
+          createdAt: serverTimestamp()
+        });
+        triggerToast("Fuel ticket added & synced to Cloud!", "ok");
+      } catch (error) {
+        handleFirestoreError(error, OperationType.CREATE, `users/${user.uid}/fuel`);
+      }
+    } else {
+      const freshFuel: FuelRecord = {
+        date: record.date || new Date().toISOString().split("T")[0],
+        unit: record.unit,
+        state: record.state.toUpperCase(),
+        gallons: record.gallons,
+        vendor: record.vendor,
+        price_per_gal: 3.45
+      };
+      const nextFuel = [...fuel, freshFuel];
+      setFuel(nextFuel);
+      
+      if (trips.length > 0) {
+        const calculation = calculateIFTA(trips, nextFuel);
+        setResults(calculation);
+      }
+      triggerToast("Fuel ticket recorded locally!");
     }
   };
 
-  const handleApplySmartMapping = (mappings: Record<string, string>) => {
+  const handleApplySmartMapping = async (mappings: Record<string, string>) => {
     if (!activeMapperType || tempParsedRows.length === 0) return;
 
     const normalized = tempParsedRows.map(row => {
@@ -130,13 +309,33 @@ export default function App() {
     });
 
     if (activeMapperType === "trip") {
-      setTrips((prev) => [...prev, ...normalized]);
-      setUploadMsg((u) => ({ ...u, trip: `✅ ${normalized.length} trip rows loaded` }));
-      triggerToast(`Successfully loaded ${normalized.length} distance records via Smart Mapping!`);
+      if (user) {
+        try {
+          await writeBatchChunked(user.uid, "trips", normalized);
+          setUploadMsg((u) => ({ ...u, trip: `✅ ${normalized.length} trip rows synced` }));
+          triggerToast(`Successfully synced ${normalized.length} trips to Cloud!`);
+        } catch (error) {
+          handleFirestoreError(error, OperationType.WRITE, `users/${user.uid}/trips`);
+        }
+      } else {
+        setTrips((prev) => [...prev, ...normalized]);
+        setUploadMsg((u) => ({ ...u, trip: `✅ ${normalized.length} trip rows loaded` }));
+        triggerToast(`Successfully loaded ${normalized.length} distance records via Smart Mapping!`);
+      }
     } else {
-      setFuel((prev) => [...prev, ...normalized]);
-      setUploadMsg((u) => ({ ...u, fuel: `✅ ${normalized.length} fuel transactions loaded via Smart Mapping` }));
-      triggerToast(`Successfully loaded ${normalized.length} fuel records via Smart Mapping!`);
+      if (user) {
+        try {
+          await writeBatchChunked(user.uid, "fuel", normalized);
+          setUploadMsg((u) => ({ ...u, fuel: `✅ ${normalized.length} transactions synced` }));
+          triggerToast(`Successfully synced ${normalized.length} fuel tickets to Cloud!`);
+        } catch (error) {
+          handleFirestoreError(error, OperationType.WRITE, `users/${user.uid}/fuel`);
+        }
+      } else {
+        setFuel((prev) => [...prev, ...normalized]);
+        setUploadMsg((u) => ({ ...u, fuel: `✅ ${normalized.length} fuel transactions loaded via Smart Mapping` }));
+        triggerToast(`Successfully loaded ${normalized.length} fuel records via Smart Mapping!`);
+      }
     }
 
     // Clean up
@@ -154,7 +353,7 @@ export default function App() {
     }
 
     const reader = new FileReader();
-    reader.onload = (e) => {
+    reader.onload = async (e) => {
       try {
         const text = e.target?.result as string;
         const parsed = parseCSV(text);
@@ -198,13 +397,33 @@ export default function App() {
           });
 
           if (type === "trip") {
-            setTrips((prev) => [...prev, ...normalized]);
-            setUploadMsg((u) => ({ ...u, trip: `✅ ${normalized.length} trip rows loaded` }));
-            triggerToast(`Successfully loaded ${normalized.length} distance records!`);
+            if (user) {
+              try {
+                await writeBatchChunked(user.uid, "trips", normalized);
+                setUploadMsg((u) => ({ ...u, trip: `✅ ${normalized.length} trip rows synced` }));
+                triggerToast(`Successfully uploaded & synced ${normalized.length} trip logs to Cloud!`, "ok");
+              } catch (error) {
+                handleFirestoreError(error, OperationType.WRITE, `users/${user.uid}/trips`);
+              }
+            } else {
+              setTrips((prev) => [...prev, ...normalized]);
+              setUploadMsg((u) => ({ ...u, trip: `✅ ${normalized.length} trip rows loaded` }));
+              triggerToast(`Successfully loaded ${normalized.length} distance records!`);
+            }
           } else {
-            setFuel((prev) => [...prev, ...normalized]);
-            setUploadMsg((u) => ({ ...u, fuel: `✅ ${normalized.length} fuel transactions loaded` }));
-            triggerToast(`Successfully loaded ${normalized.length} fuel records!`);
+            if (user) {
+              try {
+                await writeBatchChunked(user.uid, "fuel", normalized);
+                setUploadMsg((u) => ({ ...u, fuel: `✅ ${normalized.length} fuel records synced` }));
+                triggerToast(`Successfully uploaded & synced ${normalized.length} fuel invoices to Cloud!`, "ok");
+              } catch (error) {
+                handleFirestoreError(error, OperationType.WRITE, `users/${user.uid}/fuel`);
+              }
+            } else {
+              setFuel((prev) => [...prev, ...normalized]);
+              setUploadMsg((u) => ({ ...u, fuel: `✅ ${normalized.length} fuel transactions loaded` }));
+              triggerToast(`Successfully loaded ${normalized.length} fuel records!`);
+            }
           }
         }
       } catch (err: any) {
@@ -316,7 +535,73 @@ export default function App() {
     triggerToast("📥 Calculation output exported to CSV.");
   };
 
-  const loadSimulatedFuelCard = () => {
+  const triggerClearTripsOnly = async () => {
+    if (user) {
+      try {
+        const tripsCol = collection(db, "users", user.uid, "trips");
+        const tripsSnapshot = await getDocs(tripsCol);
+        const tripBatches = [];
+        let currentBatch = writeBatch(db);
+        let count = 0;
+        tripsSnapshot.forEach((docSnapshot) => {
+          currentBatch.delete(docSnapshot.ref);
+          count++;
+          if (count === 400) {
+            tripBatches.push(currentBatch);
+            currentBatch = writeBatch(db);
+            count = 0;
+          }
+        });
+        if (count > 0) tripBatches.push(currentBatch);
+        for (const b of tripBatches) {
+          await b.commit();
+        }
+        setUploadMsg(p => ({ ...p, trip: "" }));
+        triggerToast("Trips cloud records cleared successfully.", "ok");
+      } catch (error) {
+        handleFirestoreError(error, OperationType.DELETE, `users/${user.uid}/trips`);
+      }
+    } else {
+      setTrips([]);
+      setUploadMsg(p => ({ ...p, trip: "" }));
+      triggerToast("Trips cleared locally.");
+    }
+  };
+
+  const triggerClearFuelOnly = async () => {
+    if (user) {
+      try {
+        const fuelCol = collection(db, "users", user.uid, "fuel");
+        const fuelSnapshot = await getDocs(fuelCol);
+        const fuelBatches = [];
+        let currentBatch = writeBatch(db);
+        let count = 0;
+        fuelSnapshot.forEach((docSnapshot) => {
+          currentBatch.delete(docSnapshot.ref);
+          count++;
+          if (count === 400) {
+            fuelBatches.push(currentBatch);
+            currentBatch = writeBatch(db);
+            count = 0;
+          }
+        });
+        if (count > 0) fuelBatches.push(currentBatch);
+        for (const b of fuelBatches) {
+          await b.commit();
+        }
+        setUploadMsg(p => ({ ...p, fuel: "" }));
+        triggerToast("Fuel cloud records cleared successfully.", "ok");
+      } catch (error) {
+        handleFirestoreError(error, OperationType.DELETE, `users/${user.uid}/fuel`);
+      }
+    } else {
+      setFuel([]);
+      setUploadMsg(p => ({ ...p, fuel: "" }));
+      triggerToast("Fuel cleared locally.");
+    }
+  };
+
+  const loadSimulatedFuelCard = async () => {
     const records: FuelRecord[] = SAMPLE_FUEL_CARD.map((item) => ({
       unit: item.unit,
       state: item.state,
@@ -340,40 +625,138 @@ export default function App() {
       { date: "2026-04-24", unit: "Truck-103", state: "NY", miles: "120" } // New York gap
     ];
 
-    setFuel(records);
-    setTrips(tripRecords);
-    setFuelCardLoaded(true);
-    triggerToast(`⛽ Mapped ${records.length} fuel invoices & parsed ${tripRecords.length} matching tripmeter logs! Ready to analyze.`);
+    if (user) {
+      try {
+        await writeBatchChunked(user.uid, "fuel", records);
+        await writeBatchChunked(user.uid, "trips", tripRecords);
+        setFuelCardLoaded(true);
+        triggerToast(`⛽ Mapped ${records.length} fuel invoices & parsed ${tripRecords.length} logs strictly on cloud!`, "ok");
+      } catch (error) {
+        handleFirestoreError(error, OperationType.WRITE, `users/${user.uid}`);
+      }
+    } else {
+      setFuel(records);
+      setTrips(tripRecords);
+      setFuelCardLoaded(true);
+      triggerToast(`⛽ Mapped ${records.length} fuel invoices & parsed ${tripRecords.length} matching tripmeter logs! Ready to analyze.`);
+    }
   };
 
-  const addManualTripRecord = () => {
+  const addManualTripRecord = async () => {
     if (!manualTrip.unit || !manualTrip.miles || isNaN(parseFloat(manualTrip.miles))) {
       triggerToast("Please provide valid Truck ID and distance miles numerical.", "err");
       return;
     }
-    setTrips((prev) => [...prev, { ...manualTrip }]);
-    setManualTrip({ unit: "", state: "TX", miles: "", date: "" });
-    triggerToast("Trip recorded locally!");
+    if (user) {
+      try {
+        const tripsCol = collection(db, "users", user.uid, "trips");
+        await addDoc(tripsCol, {
+          unit: manualTrip.unit,
+          state: manualTrip.state.toUpperCase().slice(0, 2),
+          miles: String(manualTrip.miles),
+          date: manualTrip.date || new Date().toISOString().split("T")[0],
+          createdAt: serverTimestamp()
+        });
+        setManualTrip({ unit: "", state: "TX", miles: "", date: "" });
+        triggerToast("Trip recorded on Firebase Cloud!", "ok");
+      } catch (error) {
+        handleFirestoreError(error, OperationType.CREATE, `users/${user.uid}/trips`);
+      }
+    } else {
+      setTrips((prev) => [...prev, { ...manualTrip }]);
+      setManualTrip({ unit: "", state: "TX", miles: "", date: "" });
+      triggerToast("Trip recorded locally!");
+    }
   };
 
-  const addManualFuelRecord = () => {
+  const addManualFuelRecord = async () => {
     if (!manualFuel.unit || !manualFuel.gallons || isNaN(parseFloat(manualFuel.gallons))) {
       triggerToast("Please input valid Truck ID and gallons volume numerical.", "err");
       return;
     }
-    setFuel((prev) => [...prev, { ...manualFuel }]);
-    setManualFuel({ unit: "", state: "TX", gallons: "", date: "" });
-    triggerToast("Fuel transaction recorded locally!");
+    if (user) {
+      try {
+        const fuelCol = collection(db, "users", user.uid, "fuel");
+        await addDoc(fuelCol, {
+          unit: manualFuel.unit,
+          state: manualFuel.state.toUpperCase().slice(0, 2),
+          gallons: String(manualFuel.gallons),
+          date: manualFuel.date || new Date().toISOString().split("T")[0],
+          vendor: "Standard Terminal",
+          price_per_gal: 3.45,
+          createdAt: serverTimestamp()
+        });
+        setManualFuel({ unit: "", state: "TX", gallons: "", date: "" });
+        triggerToast("Fuel transaction recorded on Firebase Cloud!", "ok");
+      } catch (error) {
+        handleFirestoreError(error, OperationType.CREATE, `users/${user.uid}/fuel`);
+      }
+    } else {
+      setFuel((prev) => [...prev, { ...manualFuel }]);
+      setManualFuel({ unit: "", state: "TX", gallons: "", date: "" });
+      triggerToast("Fuel transaction recorded locally!");
+    }
   };
 
-  const triggerClearAll = () => {
-    setTrips([]);
-    setFuel([]);
-    setResults(null);
-    setAnomalies(null);
-    setFuelCardLoaded(false);
-    setUploadMsg({ trip: "", fuel: "" });
-    triggerToast("All databases cleared successfully.");
+  const triggerClearAll = async () => {
+    if (user) {
+      try {
+        // Clear trips and fuel
+        const tripsCol = collection(db, "users", user.uid, "trips");
+        const fuelCol = collection(db, "users", user.uid, "fuel");
+        
+        const tripsSnapshot = await getDocs(tripsCol);
+        const fuelSnapshot = await getDocs(fuelCol);
+
+        const tripBatches = [];
+        let currentBatch = writeBatch(db);
+        let count = 0;
+        tripsSnapshot.forEach((docSnapshot) => {
+          currentBatch.delete(docSnapshot.ref);
+          count++;
+          if (count === 400) {
+            tripBatches.push(currentBatch);
+            currentBatch = writeBatch(db);
+            count = 0;
+          }
+        });
+        if (count > 0) tripBatches.push(currentBatch);
+        for (const b of tripBatches) {
+          await b.commit();
+        }
+
+        const fuelBatches = [];
+        currentBatch = writeBatch(db);
+        count = 0;
+        fuelSnapshot.forEach((docSnapshot) => {
+          currentBatch.delete(docSnapshot.ref);
+          count++;
+          if (count === 400) {
+            fuelBatches.push(currentBatch);
+            currentBatch = writeBatch(db);
+            count = 0;
+          }
+        });
+        if (count > 0) fuelBatches.push(currentBatch);
+        for (const b of fuelBatches) {
+          await b.commit();
+        }
+
+        setFuelCardLoaded(false);
+        setUploadMsg({ trip: "", fuel: "" });
+        triggerToast("All Cloud databases cleared successfully.", "ok");
+      } catch (error) {
+        handleFirestoreError(error, OperationType.DELETE, `users/${user.uid}`);
+      }
+    } else {
+      setTrips([]);
+      setFuel([]);
+      setResults(null);
+      setAnomalies(null);
+      setFuelCardLoaded(false);
+      setUploadMsg({ trip: "", fuel: "" });
+      triggerToast("All databases cleared successfully.");
+    }
   };
 
   // Summaries
@@ -405,6 +788,64 @@ export default function App() {
           </div>
 
           <div className="flex flex-wrap items-center gap-3 w-full md:w-auto justify-end">
+            {/* Google Authentication / Firebase Cloud Sync Status Widget */}
+            {authLoading ? (
+              <div className="flex items-center gap-2 bg-slate-900/60 border border-slate-800/80 px-3 py-1.5 rounded-lg text-xs font-semibold text-slate-500">
+                <div className="w-3 h-3 rounded-full border-2 border-t-transparent border-slate-400 animate-spin" />
+                <span>Checking Cloud Session...</span>
+              </div>
+            ) : user ? (
+              <div className="flex items-center gap-3 bg-slate-900/60 border border-emerald-500/20 px-3 py-1 bg-gradient-to-r from-emerald-500/[0.02] to-transparent rounded-lg">
+                <div className="flex items-center gap-2">
+                  <div className="relative">
+                    {user.photoURL ? (
+                      <img 
+                        src={user.photoURL} 
+                        alt="Profile" 
+                        className="w-6 h-6 rounded-full border border-emerald-500/30" 
+                        referrerPolicy="no-referrer"
+                      />
+                    ) : (
+                      <div className="w-6 h-6 rounded-full bg-emerald-500/10 border border-emerald-500/30 flex items-center justify-center text-[10px] text-emerald-400 font-bold">
+                        {user.displayName ? user.displayName.slice(0, 2).toUpperCase() : <UserIcon className="w-3 h-3" />}
+                      </div>
+                    )}
+                    <span className="absolute bottom-0 right-0 w-2 h-2 bg-emerald-500 border border-[#070b13] rounded-full animate-pulse" />
+                  </div>
+                  <div className="hidden sm:block text-left">
+                    <div className="text-[10px] uppercase font-bold text-slate-400 leading-none">Cloud Sync Active</div>
+                    <div className="text-[11px] font-medium text-slate-200 mt-0.5 max-w-[120px] truncate leading-none">
+                      {user.displayName || user.displayName || user.email?.split("@")[0]}
+                    </div>
+                  </div>
+                </div>
+                <button
+                  id="signOutBtn"
+                  title="Sign Out to Guest Mode"
+                  className="p-1 px-1.5 rounded bg-slate-950 hover:bg-red-950/40 text-slate-400 hover:text-red-400 border border-slate-800 hover:border-red-500/20 transition cursor-pointer flex items-center gap-1.5 text-xs font-medium"
+                  onClick={handleSignOut}
+                >
+                  <LogOut className="w-3 h-3" />
+                  <span className="text-[10px]">Sign Out</span>
+                </button>
+              </div>
+            ) : (
+              <div className="flex items-center gap-2.5 bg-slate-900/60 border border-slate-800/80 px-2.5 py-1 rounded-lg">
+                <span className="flex items-center gap-1 text-[11px] text-slate-500">
+                  <span className="w-1.5 h-1.5 bg-slate-500 rounded-full" />
+                  <span>Guest Mode (Local)</span>
+                </span>
+                <button
+                  id="googleSignInBtn"
+                  className="px-2.5 py-1 bg-white hover:bg-slate-100 text-[#070b13] font-semibold text-[11px] rounded-md transition duration-150 flex items-center gap-1 cursor-pointer shadow-sm"
+                  onClick={handleSignIn}
+                >
+                  <LogIn className="w-3 h-3 text-slate-800" />
+                  <span>Sign In / Sync</span>
+                </button>
+              </div>
+            )}
+
             <div className="flex items-center gap-1.5 bg-slate-900 border border-slate-800 px-3 py-1.5 rounded-lg text-xs font-semibold text-slate-400">
               <Calendar className="w-3.5 h-3.5 text-slate-500" />
               <span>Target Period:</span>
@@ -731,7 +1172,7 @@ Truck-102,   IL,    92.00,   2026-04-03
                   <div className="space-y-2">
                     <div className="flex items-center justify-between">
                       <span className="text-xs text-slate-400 font-semibold uppercase tracking-wider">{trips.length} loaded records — Preview (first 5 rows)</span>
-                      <button className="text-[11px] text-red-400 flex items-center gap-1 hover:underline" onClick={() => { setTrips([]); setUploadMsg(p => ({ ...p, trip: "" })); }} id="clearTripsBtn">
+                      <button className="text-[11px] text-red-400 flex items-center gap-1 hover:underline" onClick={triggerClearTripsOnly} id="clearTripsBtn">
                         <Trash2 className="w-3 h-3" /> Clear
                       </button>
                     </div>
@@ -809,7 +1250,7 @@ Truck-102,   IL,    92.00,   2026-04-03
                   <div className="space-y-2">
                     <div className="flex items-center justify-between">
                       <span className="text-xs text-slate-400 font-semibold uppercase tracking-wider">{fuel.length} loaded records — Preview (first 5 rows)</span>
-                      <button className="text-[11px] text-red-400 flex items-center gap-1 hover:underline" onClick={() => { setFuel([]); setUploadMsg(p => ({ ...p, fuel: "" })); }} id="clearFuelBtn">
+                      <button className="text-[11px] text-red-400 flex items-center gap-1 hover:underline" onClick={triggerClearFuelOnly} id="clearFuelBtn">
                         <Trash2 className="w-3 h-3" /> Clear
                       </button>
                     </div>

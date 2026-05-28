@@ -1,0 +1,123 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    
+    // Global Safety Net Default-Deny Catch-All
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Global Hardened Helpers
+    function isValidId(id) { 
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$'); 
+    }
+    
+    function incoming() { 
+      return request.resource.data; 
+    }
+    
+    function existing() { 
+      return resource.data; 
+    }
+    
+    function isSignedIn() { 
+      return request.auth != null; 
+    }
+    
+    function isVerifiedUser() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    // Master Gate validation - child records require valid parent profile
+    function userProfileExists(userId) {
+      return exists(/databases/$(database)/documents/users/$(userId));
+    }
+
+    // Entity validator logic blocks
+    function isValidUser(data) {
+      return data.email is string && data.email.size() > 0 && data.email.size() <= 256
+        && data.createdAt == request.time
+        && data.updatedAt == request.time
+        && (!data.keys().hasAll(['displayName']) || (data.displayName is string && data.displayName.size() <= 128))
+        && data.keys().hasAll(['email', 'createdAt', 'updatedAt'])
+        && data.keys().size() <= 4;
+    }
+
+    function isValidUserUpdate(data) {
+      return data.email is string && data.email.size() > 0 && data.email.size() <= 256
+        && data.updatedAt == request.time
+        && data.createdAt == resource.data.createdAt
+        && (!data.keys().hasAll(['displayName']) || (data.displayName is string && data.displayName.size() <= 128))
+        && data.keys().hasAll(['email', 'createdAt', 'updatedAt'])
+        && data.keys().size() <= 4;
+    }
+
+    function isValidTrip(data) {
+      return data.unit is string && data.unit.size() > 0 && data.unit.size() <= 64
+        && data.state is string && data.state.size() == 2
+        && data.miles is string && data.miles.size() > 0 && data.miles.size() <= 32
+        && data.date is string && data.date.size() >= 10 && data.date.size() <= 32
+        && data.createdAt == request.time
+        && data.keys().hasAll(['unit', 'state', 'miles', 'date', 'createdAt'])
+        && data.keys().size() == 5;
+    }
+
+    function isValidTripUpdate(data) {
+      return data.unit is string && data.unit.size() > 0 && data.unit.size() <= 64
+        && data.state is string && data.state.size() == 2
+        && data.miles is string && data.miles.size() > 0 && data.miles.size() <= 32
+        && data.date is string && data.date.size() >= 10 && data.date.size() <= 32
+        && data.createdAt == resource.data.createdAt
+        && data.keys().hasAll(['unit', 'state', 'miles', 'date', 'createdAt'])
+        && data.keys().size() == 5;
+    }
+
+    function isValidFuel(data) {
+      return data.unit is string && data.unit.size() > 0 && data.unit.size() <= 64
+        && data.state is string && data.state.size() == 2
+        && data.gallons is string && data.gallons.size() > 0 && data.gallons.size() <= 32
+        && data.date is string && data.date.size() >= 10 && data.date.size() <= 32
+        && data.createdAt == request.time
+        && (!data.keys().hasAll(['vendor']) || (data.vendor is string && data.vendor.size() <= 128))
+        && (!data.keys().hasAll(['price_per_gal']) || (data.price_per_gal is number))
+        && data.keys().hasAll(['unit', 'state', 'gallons', 'date', 'createdAt'])
+        && data.keys().size() <= 7;
+    }
+
+    function isValidFuelUpdate(data) {
+      return data.unit is string && data.unit.size() > 0 && data.unit.size() <= 64
+        && data.state is string && data.state.size() == 2
+        && data.gallons is string && data.gallons.size() > 0 && data.gallons.size() <= 32
+        && data.date is string && data.date.size() >= 10 && data.date.size() <= 32
+        && data.createdAt == resource.data.createdAt
+        && (!data.keys().hasAll(['vendor']) || (data.vendor is string && data.vendor.size() <= 128))
+        && (!data.keys().hasAll(['price_per_gal']) || (data.price_per_gal is number))
+        && data.keys().hasAll(['unit', 'state', 'gallons', 'date', 'createdAt'])
+        && data.keys().size() <= 7;
+    }
+
+    // Secure Collection Mounts
+    match /users/{userId} {
+      allow get: if isVerifiedUser() && userId == request.auth.uid;
+      allow create: if isVerifiedUser() && userId == request.auth.uid && isValidId(userId) && isValidUser(incoming());
+      allow update: if isVerifiedUser() && userId == request.auth.uid && isValidUserUpdate(incoming()) && incoming().diff(existing()).affectedKeys().hasOnly(['email', 'displayName', 'updatedAt']);
+      allow delete: if false; // Read-Only Client deletion protection (Zero-Trust)
+
+      // Trips - Nested Collection
+      match /trips/{tripId} {
+        allow list, get: if isVerifiedUser() && userId == request.auth.uid;
+        allow create: if isVerifiedUser() && userId == request.auth.uid && isValidId(tripId) && userProfileExists(userId) && isValidTrip(incoming());
+        allow update: if isVerifiedUser() && userId == request.auth.uid && userProfileExists(userId) && isValidTripUpdate(incoming()) && incoming().diff(existing()).affectedKeys().hasOnly(['unit', 'state', 'miles', 'date']);
+        allow delete: if isVerifiedUser() && userId == request.auth.uid;
+      }
+
+      // Fuel Transactions - Nested Collection
+      match /fuel/{fuelId} {
+        allow list, get: if isVerifiedUser() && userId == request.auth.uid;
+        allow create: if isVerifiedUser() && userId == request.auth.uid && isValidId(fuelId) && userProfileExists(userId) && isValidFuel(incoming());
+        allow update: if isVerifiedUser() && userId == request.auth.uid && userProfileExists(userId) && isValidFuelUpdate(incoming()) && incoming().diff(existing()).affectedKeys().hasOnly(['unit', 'state', 'gallons', 'date', 'vendor', 'price_per_gal']);
+        allow delete: if isVerifiedUser() && userId == request.auth.uid;
+      }
+    }
+  }
+}

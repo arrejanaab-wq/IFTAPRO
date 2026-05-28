@@ -1,0 +1,110 @@
+{
+  "entities": {
+    "User": {
+      "title": "User",
+      "description": "User profile with basic info",
+      "type": "object",
+      "properties": {
+        "email": {
+          "type": "string",
+          "description": "The user's registered email address"
+        },
+        "displayName": {
+          "type": "string",
+          "description": "The user's display name"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Creation timestamp"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Modification timestamp"
+        }
+      },
+      "required": ["email", "createdAt", "updatedAt"]
+    },
+    "Trip": {
+      "title": "Trip",
+      "description": "Trip record with distance traveled inside a state",
+      "type": "object",
+      "properties": {
+        "unit": {
+          "type": "string",
+          "description": "The truck unit number or ID"
+        },
+        "state": {
+          "type": "string",
+          "description": "Standard 2-letter state abbreviation representing jurisdiction"
+        },
+        "miles": {
+          "type": "string",
+          "description": "Numeric string of miles driven"
+        },
+        "date": {
+          "type": "string",
+          "description": "ISO date string when trip occurred"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server creation timestamp"
+        }
+      },
+      "required": ["unit", "state", "miles", "date", "createdAt"]
+    },
+    "Fuel": {
+      "title": "Fuel",
+      "description": "Fuel transaction record detailing fuel purchased",
+      "type": "object",
+      "properties": {
+        "unit": {
+          "type": "string",
+          "description": "The truck unit number or ID"
+        },
+        "state": {
+          "type": "string",
+          "description": "2-letter state abbreviation representing purchase state"
+        },
+        "gallons": {
+          "type": "string",
+          "description": "Numeric string of gallons of fuel purchased"
+        },
+        "date": {
+          "type": "string",
+          "description": "ISO date string when fuel was purchased"
+        },
+        "vendor": {
+          "type": "string",
+          "description": "Name of terminal vendor or gas company"
+        },
+        "price_per_gal": {
+          "type": "number",
+          "description": "Cost per gallon"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server creation timestamp"
+        }
+      },
+      "required": ["unit", "state", "gallons", "date", "createdAt"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "User",
+      "description": "The collection storing main profile records"
+    },
+    "/users/{userId}/trips/{tripId}": {
+      "schema": "Trip",
+      "description": "Child collection of trip records"
+    },
+    "/users/{userId}/fuel/{fuelId}": {
+      "schema": "Fuel",
+      "description": "Child collection of fuel transaction receipts"
+    }
+  }
+}
