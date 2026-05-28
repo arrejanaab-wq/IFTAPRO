@@ -29,6 +29,14 @@ import { TripRecord, FuelRecord, CalculationResults, AIAnalysisResponse, StateRe
 import { IFTA_RATES, STATE_NAMES, QUARTERS, SAMPLE_FUEL_CARD } from "./data";
 import { parseCSV, calculateIFTA, generatePDFHTML } from "./utils";
 
+// Import modular dashboard subcomponents
+import DeadlineAlerts from "./components/DeadlineAlerts";
+import SaasBilling from "./components/SaaSBilling";
+import RouteOptimizer from "./components/RouteOptimizer";
+import ReceiptScanner from "./components/ReceiptScanner";
+import SmartColumnMapper from "./components/SmartColumnMapper";
+import FleetAnalytics from "./components/FleetAnalytics";
+
 export default function App() {
   const [tab, setTab] = useState<string>("dashboard");
   const [quarter, setQuarter] = useState<string>("Q2 2026");
@@ -65,12 +73,76 @@ export default function App() {
   const [uploadMsg, setUploadMsg] = useState<{ trip: string; fuel: string }>({ trip: "", fuel: "" });
   const [dragOver, setDragOver] = useState<{ trip: boolean; fuel: boolean }>({ trip: false, fuel: false });
 
+  // SMART HEADER ALIGNER STATE
+  const [tempParsedHeaders, setTempParsedHeaders] = useState<string[]>([]);
+  const [tempParsedRows, setTempParsedRows] = useState<any[]>([]);
+  const [activeMapperType, setActiveMapperType] = useState<"trip" | "fuel" | null>(null);
+
   const tripFileInput = useRef<HTMLInputElement>(null);
   const fuelFileInput = useRef<HTMLInputElement>(null);
 
   const triggerToast = (msg: string, type: "ok" | "err" = "ok") => {
     setToast({ msg, type });
     setTimeout(() => setToast(null), 3500);
+  };
+
+  // Safe manual addition helper (used by OCR and Optimizer results)
+  const handleAddFuelDirect = (record: { date: string; unit: string; state: string; gallons: string; vendor: string }) => {
+    const freshFuel: FuelRecord = {
+      date: record.date || new Date().toISOString().split("T")[0],
+      unit: record.unit,
+      state: record.state.toUpperCase(),
+      gallons: record.gallons,
+      vendor: record.vendor,
+      price_per_gal: 3.45
+    };
+    const nextFuel = [...fuel, freshFuel];
+    setFuel(nextFuel);
+    
+    if (trips.length > 0) {
+      const calculation = calculateIFTA(trips, nextFuel);
+      setResults(calculation);
+    }
+  };
+
+  const handleApplySmartMapping = (mappings: Record<string, string>) => {
+    if (!activeMapperType || tempParsedRows.length === 0) return;
+
+    const normalized = tempParsedRows.map(row => {
+      const mappedRow: any = {};
+      const actualUnitKey = mappings["unit_number"];
+      const actualStateKey = mappings["state"];
+      
+      mappedRow.unit = row[actualUnitKey] || "Unknown";
+      mappedRow.state = (row[actualStateKey] || "TX").toUpperCase();
+      mappedRow.date = row[mappings["date"]] || new Date().toISOString().split("T")[0];
+
+      if (activeMapperType === "trip") {
+        const actualMilesKey = mappings["miles"];
+        mappedRow.miles = String(row[actualMilesKey] || "0");
+      } else {
+        const actualGallonsKey = mappings["gallons"];
+        mappedRow.gallons = String(row[actualGallonsKey] || "0");
+        mappedRow.vendor = row[mappings["vendor"]] || "Standard Terminal";
+        mappedRow.price_per_gal = parseFloat(String(row[mappings["price_per_gal"]] || "3.45"));
+      }
+      return mappedRow;
+    });
+
+    if (activeMapperType === "trip") {
+      setTrips((prev) => [...prev, ...normalized]);
+      setUploadMsg((u) => ({ ...u, trip: `✅ ${normalized.length} trip rows loaded` }));
+      triggerToast(`Successfully loaded ${normalized.length} distance records via Smart Mapping!`);
+    } else {
+      setFuel((prev) => [...prev, ...normalized]);
+      setUploadMsg((u) => ({ ...u, fuel: `✅ ${normalized.length} fuel transactions loaded via Smart Mapping` }));
+      triggerToast(`Successfully loaded ${normalized.length} fuel records via Smart Mapping!`);
+    }
+
+    // Clean up
+    setTempParsedHeaders([]);
+    setTempParsedRows([]);
+    setActiveMapperType(null);
   };
 
   // Drag and drop logic
@@ -88,18 +160,52 @@ export default function App() {
         const parsed = parseCSV(text);
         
         if (parsed.length === 0) {
-          triggerToast("CSV parsed 0 rows. Please verify column headings (e.g. unit_number, state, miles, gallons).", "err");
+          triggerToast("CSV parsed 0 rows. Please verify column headings.", "err");
           return;
         }
 
-        if (type === "trip") {
-          setTrips((prev) => [...prev, ...parsed]);
-          setUploadMsg((u) => ({ ...u, trip: `✅ ${parsed.length} trip rows loaded` }));
-          triggerToast(`Successfully loaded ${parsed.length} distance records!`);
+        // Intercept column headers to determine if mapping overlay is necessary
+        const parsedKeys = Object.keys(parsed[0]);
+        const hasUnit = parsedKeys.includes("unit_number") || parsedKeys.includes("unit") || parsedKeys.includes("truck_id") || parsedKeys.includes("truck");
+        const hasState = parsedKeys.includes("state") || parsedKeys.includes("jurisdiction") || parsedKeys.includes("st");
+        const hasMiles = type === "trip" && (parsedKeys.includes("miles") || parsedKeys.includes("distance") || parsedKeys.includes("driven_miles"));
+        const hasGallons = type === "fuel" && (parsedKeys.includes("gallons") || parsedKeys.includes("quantity") || parsedKeys.includes("vol") || parsedKeys.includes("qty"));
+
+        const isFullyMapped = hasUnit && hasState && (type === "trip" ? hasMiles : hasGallons);
+
+        if (!isFullyMapped) {
+          setTempParsedHeaders(parsedKeys);
+          setTempParsedRows(parsed);
+          setActiveMapperType(type);
+          triggerToast("Column mismatch detected! Launching Smart CSV Mapping Wizard...", "err");
         } else {
-          setFuel((prev) => [...prev, ...parsed]);
-          setUploadMsg((u) => ({ ...u, fuel: `✅ ${parsed.length} fuel transactions loaded` }));
-          triggerToast(`Successfully loaded ${parsed.length} fuel records!`);
+          const normalized = parsed.map(row => {
+            const mappedRow: any = {};
+            if (type === "trip") {
+              mappedRow.unit = row.unit_number || row.unit || row.truck_id || row.truck;
+              mappedRow.state = (row.state || row.jurisdiction || row.st || "TX").toUpperCase();
+              mappedRow.miles = String(row.miles || row.distance || row.driven_miles || "0");
+              mappedRow.date = row.date || new Date().toISOString().split("T")[0];
+            } else {
+              mappedRow.unit = row.unit_number || row.unit || row.truck_id || row.truck;
+              mappedRow.state = (row.state || row.jurisdiction || row.st || "TX").toUpperCase();
+              mappedRow.gallons = String(row.gallons || row.quantity || row.vol || row.qty || "0");
+              mappedRow.date = row.date || new Date().toISOString().split("T")[0];
+              mappedRow.vendor = row.vendor || row.merchant || "Standard Terminal";
+              mappedRow.price_per_gal = parseFloat(String(row.price_per_gal || row.rate || "3.45"));
+            }
+            return mappedRow;
+          });
+
+          if (type === "trip") {
+            setTrips((prev) => [...prev, ...normalized]);
+            setUploadMsg((u) => ({ ...u, trip: `✅ ${normalized.length} trip rows loaded` }));
+            triggerToast(`Successfully loaded ${normalized.length} distance records!`);
+          } else {
+            setFuel((prev) => [...prev, ...normalized]);
+            setUploadMsg((u) => ({ ...u, fuel: `✅ ${normalized.length} fuel transactions loaded` }));
+            triggerToast(`Successfully loaded ${normalized.length} fuel records!`);
+          }
         }
       } catch (err: any) {
         triggerToast("Failed to parse CSV file: " + err.message, "err");
@@ -219,9 +325,25 @@ export default function App() {
       price_per_gal: item.price_per_gal,
       vendor: item.vendor
     }));
-    setFuel((prev) => [...prev, ...records]);
+
+    const tripRecords: TripRecord[] = [
+      { date: "2026-04-01", unit: "Truck-101", state: "TX", miles: "450" },
+      { date: "2026-04-03", unit: "Truck-101", state: "LA", miles: "320" },
+      { date: "2026-04-04", unit: "Truck-101", state: "MS", miles: "150" }, // Arkansas/Mississippi tax segments (Missing Receipt Gaps!)
+      
+      { date: "2026-04-08", unit: "Truck-102", state: "IL", miles: "510" },
+      { date: "2026-04-12", unit: "Truck-102", state: "IN", miles: "300" },
+      { date: "2026-04-14", unit: "Truck-102", state: "KY", miles: "220" }, // Kentucky gap
+      
+      { date: "2026-04-18", unit: "Truck-103", state: "OH", miles: "400" },
+      { date: "2026-04-22", unit: "Truck-103", state: "PA", miles: "580" },
+      { date: "2026-04-24", unit: "Truck-103", state: "NY", miles: "120" } // New York gap
+    ];
+
+    setFuel(records);
+    setTrips(tripRecords);
     setFuelCardLoaded(true);
-    triggerToast(`⛽ Loaded ${records.length} mock transactions from card sync.`);
+    triggerToast(`⛽ Mapped ${records.length} fuel invoices & parsed ${tripRecords.length} matching tripmeter logs! Ready to analyze.`);
   };
 
   const addManualTripRecord = () => {
@@ -332,25 +454,30 @@ export default function App() {
 
       {/* ── TABS NAV ── */}
       <div className="bg-[#090f1a] border-b border-slate-900/60 sticky top-[73px] z-30 sub-nav-classes">
-        <div className="max-w-7xl mx-auto px-6 overflow-x-auto flex gap-1.5 py-2.5">
+        <div className="max-w-7xl mx-auto px-6 overflow-x-auto flex gap-1.5 py-2.5 scrollbar-thin scrollbar-thumb-slate-800">
           {[
-            { id: "dashboard", label: "Dashboard", desc: "Overview stats & guide" },
-            { id: "upload", label: "Upload CSV", desc: "Import spreadsheet records" },
-            { id: "manual", label: "Manual Entry", desc: "Add single data points" },
-            { id: "fuelcard", label: "Fuel Card Sync", desc: "Digital telematics ingestion" },
-            { id: "rates", label: "Diesel Tax Rates", desc: "Q2 2026 rates table" },
-            { id: "results", label: "Calculation Results", desc: "State details breakdown" },
-            { id: "ai", label: "AI Audit & Risks", desc: "Cognitive compliance scan" },
+            { id: "dashboard", label: "Dashboard" },
+            { id: "analytics", label: "📊 Fleet Intelligence" },
+            { id: "optimization", label: "🌎 Route Surcharges" },
+            { id: "ocr", label: "📸 Receipt OCR" },
+            { id: "deadlines", label: "🔔 Alerts & Deadlines" },
+            { id: "upload", label: "Upload CSV" },
+            { id: "manual", label: "Manual Entry" },
+            { id: "fuelcard", label: "Fuel Card Sync" },
+            { id: "rates", label: "Diesel Tax Rates" },
+            { id: "results", label: "Calculation Results" },
+            { id: "ai", label: "AI Audit & Risks" },
+            { id: "billing", label: "💰 SaaS Billing" }
           ].map((item) => {
             const isActive = tab === item.id;
             return (
               <button
                 key={item.id}
                 id={`tabBtn-${item.id}`}
-                className={`px-4 py-2 rounded-lg font-medium text-xs whitespace-nowrap transition cursor-pointer flex flex-col items-start ${
+                className={`px-3.5 py-2.5 rounded-lg font-bold text-xs whitespace-nowrap transition cursor-pointer flex items-center ${
                   isActive 
-                    ? "bg-gradient-to-br from-orange-500/10 to-red-600/10 border border-orange-500/30 text-orange-400 font-semibold" 
-                    : "border border-transparent text-slate-400 hover:text-slate-100"
+                    ? "bg-gradient-to-br from-orange-500/15 to-red-600/15 border border-orange-500/35 text-orange-400 font-semibold" 
+                    : "border border-transparent text-slate-400 hover:text-slate-100 hover:bg-slate-900/40"
                 }`}
                 onClick={() => setTab(item.id)}
               >
@@ -499,15 +626,57 @@ Truck-102,   IL,    92.00,   2026-04-03
                 <p className="text-xs text-slate-400 mt-0.5">Toggle our instant telematics demo data under the Fuel Card tab, then hit calculate.</p>
               </div>
               <div className="flex gap-2.5">
-                <button className="px-3.5 py-1.5 bg-slate-900 hover:bg-slate-800 border border-slate-800 rounded-lg text-xs font-medium text-slate-200 transition" onClick={() => setTab("fuelcard")}>
+                <button className="px-3.5 py-1.5 bg-slate-900 hover:bg-slate-800 border border-slate-800 rounded-lg text-xs font-medium text-slate-200 transition pointer-events-auto" onClick={() => loadSimulatedFuelCard()}>
                   Load Instant Sample
                 </button>
-                <button className="px-3.5 py-1.5 bg-orange-600 hover:bg-orange-500 text-white rounded-lg text-xs font-semibold transition" onClick={() => setTab("upload")}>
+                <button className="px-3.5 py-1.5 bg-orange-600 hover:bg-orange-500 text-white rounded-lg text-xs font-semibold transition cursor-pointer" onClick={() => setTab("upload")}>
                   Upload My Files
                 </button>
               </div>
             </div>
           </div>
+        )}
+
+        {/* SMART COLUMN ALIGNER OVERLAY PANEL */}
+        {activeMapperType && tempParsedHeaders.length > 0 && (
+          <div className="mb-8">
+            <SmartColumnMapper 
+              csvHeaders={tempParsedHeaders} 
+              csvType={activeMapperType} 
+              onMappingApplied={handleApplySmartMapping} 
+              triggerToast={triggerToast} 
+              onCancel={() => {
+                setTempParsedHeaders([]);
+                setTempParsedRows([]);
+                setActiveMapperType(null);
+              }}
+            />
+          </div>
+        )}
+
+        {/* ════ FLEET INTELLIGENCE & ANALYTICS ════ */}
+        {tab === "analytics" && (
+          <FleetAnalytics results={results} tripsCount={trips.length} fuelCount={fuel.length} />
+        )}
+
+        {/* ════ ROUTE SURCHARGES OPTIMIZATION ════ */}
+        {tab === "optimization" && (
+          <RouteOptimizer onAddLog={handleAddFuelDirect} triggerToast={triggerToast} />
+        )}
+
+        {/* ════ RECEIPT OCR SCANNER ════ */}
+        {tab === "ocr" && (
+          <ReceiptScanner onAddFuelRecord={handleAddFuelDirect} triggerToast={triggerToast} />
+        )}
+
+        {/* ════ DEADLINE ALERTS & MISSING RECEIPT DETECTOR ════ */}
+        {tab === "deadlines" && (
+          <DeadlineAlerts results={results} onNavigateToTab={(newTab) => setTab(newTab)} />
+        )}
+
+        {/* ════ SUBSCRIPTION SAAS BILLING ════ */}
+        {tab === "billing" && (
+          <SaasBilling />
         )}
 
         {/* ════ UPLOAD CSV ════ */}

@@ -130,6 +130,262 @@ ${payloadText}`;
   }
 });
 
+// AI OCR Fuel Receipt Extractor Endpoint
+app.post("/api/ocr-receipt", async (req, res) => {
+  try {
+    const { image, mimeType } = req.body;
+    if (!image) {
+      return res.status(400).json({ error: "Missing receipt image" });
+    }
+
+    // Handle offline fallback to mock OCR if GEMINI_API_KEY is not defined
+    if (!process.env.GEMINI_API_KEY) {
+      // Simulate quick extraction for beautiful responsive test actions
+      const sampleVendors = ["Love's Travel Stops", "Pilot Flying J", "TA TravelCenter", "ExxonMobil", "Shell Depot"];
+      const randomVendor = sampleVendors[Math.floor(Math.random() * sampleVendors.length)];
+      const sampleStates = ["TX", "OK", "KS", "NM", "IL", "IN", "NE"];
+      const randomState = sampleStates[Math.floor(Math.random() * sampleStates.length)];
+      
+      const randomGals = parseFloat((40 + Math.random() * 85).toFixed(2));
+      const amountVal = parseFloat((randomGals * (3.10 + Math.random() * 0.75)).toFixed(2));
+      const todayDate = new Date().toISOString().split("T")[0];
+
+      return res.json({
+        gallons: randomGals,
+        date: todayDate,
+        vendor: randomVendor,
+        state: randomState,
+        amount: amountVal,
+        simulated: true,
+        summary: "Notice: Simulating AI parsing locally (GEMINI_API_KEY missing in Secrets Settings)."
+      });
+    }
+
+    // Strip out base64 visual header tag formatting
+    let base64Data = image;
+    let resolvedMimeType = mimeType || "image/jpeg";
+    if (image.startsWith("data:")) {
+      const parts = image.split(",");
+      base64Data = parts[1];
+      const mimeMatch = parts[0].match(/data:(.*?);/);
+      if (mimeMatch) {
+         resolvedMimeType = mimeMatch[1];
+      }
+    }
+
+    const imagePart = {
+      inlineData: {
+        mimeType: resolvedMimeType,
+        data: base64Data,
+      },
+    };
+
+    const textPart = {
+      text: "Analyze the image of this truck/diesel fuel receipt. Extract standard parameters: total gallons of diesel fuel purchased, date of transaction (as YYYY-MM-DD), name of vendor or truck stop franchise, 2-letter state code, and total raw dollars spent.",
+    };
+
+    const response = await ai.models.generateContent({
+      model: "gemini-3.5-flash",
+      contents: { parts: [imagePart, textPart] },
+      config: {
+        systemInstruction: "You are an AI receipt digitizing model. Extract physical variables from heavy vehicle fuel receipts and return JSON matching the schema.",
+        responseMimeType: "application/json",
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            gallons: { type: Type.NUMBER, description: "Total gallons of diesel fuel purchased. Use float or int." },
+            date: { type: Type.STRING, description: "Format date as 'YYYY-MM-DD'." },
+            vendor: { type: Type.STRING, description: "The name of the fuel retailer, stop, pilot, shell, love, etc." },
+            state: { type: Type.STRING, description: "The two-character state code designation, e.g. TX, OK." },
+            amount: { type: Type.NUMBER, description: "Total raw decimal payment amount dollars paid." }
+          },
+          required: ["gallons", "date", "vendor", "state", "amount"]
+        }
+      }
+    });
+
+    const parsedData = JSON.parse(response.text || "{}");
+    res.json({ ...parsedData, simulated: false });
+  } catch (error: any) {
+    console.error("AI OCR Receipt extraction failed:", error);
+    res.status(500).json({ error: error?.message || "Internal server error occurred during AI receipt scanner parsing" });
+  }
+});
+
+// AI Route optimization & IFTA advisory endpoint
+app.post("/api/route-optimize", async (req, res) => {
+  try {
+    const { startCity, endCity, stateTransitList, fuelTankCapacity } = req.body;
+    if (!startCity || !endCity || !stateTransitList || stateTransitList.length === 0) {
+      return res.status(400).json({ error: "Missing starting point, ending point, or transit jurisdictions" });
+    }
+
+    const tankGallons = fuelTankCapacity || 150;
+
+    if (!process.env.GEMINI_API_KEY) {
+      // Return beautiful compliance analytics simulation for the client
+      const simulatedSavings = parseFloat((120 + Math.random() * 200).toFixed(2));
+      const refuels = stateTransitList.map((st: string) => {
+        const isLowTax = ["TX", "OK", "NM", "LA", "MS", "MO", "NV"].includes(st.toUpperCase());
+        return {
+          state: st.toUpperCase(),
+          optimal_gallons: isLowTax ? Math.ceil(tankGallons * 0.8) : 0,
+          estimated_price_per_gallon: isLowTax ? 3.12 : 3.84,
+          reasoning: isLowTax 
+            ? `Extremely low tax state (${st}). Refueling here delivers a high net IFTA discount.` 
+            : `High regulatory tax burden state. Avoid purchasing high volumes here. Buy only bare minimum transiting gallons.`
+        };
+      }).filter(r => r.optimal_gallons > 0);
+
+      return res.json({
+        suggested_refuels: refuels,
+        estimated_savings: simulatedSavings,
+        alternate_route_advice: `Consider transiting via Oklahoma corridors rather than deep Illinois tollways where fuel taxes peak near $0.736/gal.`,
+        general_summary: `Your route spans ${stateTransitList.length} states. Refueling heavily in lower tax jurisdictions and executing minimal bypass draws optimizes fuel expenditure.`,
+        simulated: true
+      });
+    }
+
+    const prompt = `Route planning optimization query for commercial carriage.
+Vehicle coordinates parameters:
+Origin: ${startCity}
+Destination: ${endCity}
+Transited jurisdictions: ${stateTransitList.join(", ")}
+Average Tank Volume: ${tankGallons} Gallons
+
+State Fuel Tax Rates (for reference):
+TX: $0.20, OK: $0.19, KS: $0.24, IL: $0.736, IN: $0.57, OH: $0.47, PA: $0.741, NY: $0.441, CA: $0.41, NV: $0.27, AZ: $0.26, NM: $0.21, LA: $0.20, MS: $0.18, AL: $0.28, GA: $0.32, SC: $0.28, NC: $0.404, VA: $0.30, TN: $0.27, KY: $0.26
+
+Examine how the fleet can minimize raw expenses and IFTA net surcharges. Suggest optimal fueling strategy.`;
+
+    const response = await ai.models.generateContent({
+      model: "gemini-3.5-flash",
+      contents: prompt,
+      config: {
+        systemInstruction: "You are an expert heavy cargo route and IFTA dispatch coordinator. Generate route advice for refueling.",
+        responseMimeType: "application/json",
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            suggested_refuels: {
+              type: Type.ARRAY,
+              items: {
+                type: Type.OBJECT,
+                properties: {
+                  state: { type: Type.STRING, description: "2-letter uppercase state code" },
+                  optimal_gallons: { type: Type.NUMBER, description: "Volume of diesel to pump at these locations" },
+                  estimated_price_per_gallon: { type: Type.NUMBER, description: "Simulated tax weight pump price" },
+                  reasoning: { type: Type.STRING, description: "Detailed financial rationale matching state IFTA rate indices" }
+                },
+                required: ["state", "optimal_gallons", "estimated_price_per_gallon", "reasoning"]
+              }
+            },
+            estimated_savings: { type: Type.NUMBER, description: "Net simulated tax planning dollars saved ($)" },
+            alternate_route_advice: { type: Type.STRING, description: "Shorter detour recommendation to bypass top tax zones" },
+            general_summary: { type: Type.STRING, description: "Strategic 2-sentence dispatch digest summary" }
+          },
+          required: ["suggested_refuels", "estimated_savings", "alternate_route_advice", "general_summary"]
+        }
+      }
+    });
+
+    const parsedData = JSON.parse(response.text || "{}");
+    res.json({ ...parsedData, simulated: false });
+  } catch (error: any) {
+    console.error("AI Route optimization failed:", error);
+    res.status(500).json({ error: error?.message || "Internal server error occurred during AI route analysis" });
+  }
+});
+
+// AI Smart CSV Mapper Endpoint
+app.post("/api/smart-map-csv", async (req, res) => {
+  try {
+    const { headers } = req.body;
+    if (!headers || !Array.isArray(headers)) {
+      return res.status(400).json({ error: "Missing headers array parameter" });
+    }
+
+    if (!process.env.GEMINI_API_KEY) {
+      // Dynamic local-regex based smart mapper mapping values gracefully
+      const result: any = {
+        unit_number_column: "",
+        state_column: "",
+        miles_column: "",
+        gallons_column: "",
+        date_column: "",
+        vendor_column: ""
+      };
+
+      headers.forEach((h: string) => {
+        const clean = h.toLowerCase().trim();
+        if (clean.includes("unit") || clean.includes("truck") || clean.includes("veh") || clean.includes("car")) {
+          result.unit_number_column = h;
+        } else if (clean.includes("state") || clean.includes("juris") || clean.includes("st") || clean.includes("prov")) {
+          result.state_column = h;
+        } else if (clean.includes("mile") || clean.includes("odo") || clean.includes("dist") || clean.includes("km")) {
+          result.miles_column = h;
+        } else if (clean.includes("gal") || clean.includes("volume") || clean.includes("qty") || clean.includes("purch") || clean.includes("lit") || clean.includes("qty")) {
+          result.gallons_column = h;
+        } else if (clean.includes("date") || clean.includes("day") || clean.includes("trans")) {
+          result.date_column = h;
+        } else if (clean.includes("vend") || clean.includes("loc") || clean.includes("shop") || clean.includes("station") || clean.includes("merc")) {
+          result.vendor_column = h;
+        }
+      });
+
+      // Default fallbacks if empty to keep system resilient
+      if (!result.unit_number_column && headers[0]) result.unit_number_column = headers[0];
+      if (!result.state_column && headers[1]) result.state_column = headers[1];
+      if (!result.miles_column && headers[2]) result.miles_column = headers[2];
+
+      return res.json({
+        ...result,
+        simulated: true,
+        summary: "Notice: Maps assigned via rule-based schema weights (GEMINI_API_KEY missing in Secrets Settings)."
+      });
+    }
+
+    const prompt = `Map these CSV upload columns into the target canonical standard headers.
+Standard target attributes:
+1. unit_number_column (represents truck ID, unit code, tractor number, vehicle ID)
+2. state_column (represents state code, province, jurisdiction, ST, location state)
+3. miles_column (represents miles traveled, distance, odo miles, odom, odo finish minus start)
+4. gallons_column (represents fuel gallons, gallons purchased, volume, fuel quantity, gallons pumped)
+5. date_column (represents date of trip, day of fuel, purchase date, log date)
+6. vendor_column (represents fuel retailer, truck stop name, station merchant, vendor)
+
+Uploaded CSV Headers array:
+${JSON.stringify(headers)}`;
+
+    const response = await ai.models.generateContent({
+      model: "gemini-3.5-flash",
+      contents: prompt,
+      config: {
+        systemInstruction: "You are an AI column mapper. Determine which loaded column headers correspond to standard database identifiers. Output matching keys.",
+        responseMimeType: "application/json",
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            unit_number_column: { type: Type.STRING, description: "Exactly match the raw header text mapping to truck unit/vehicle ID from candidate headers list." },
+            state_column: { type: Type.STRING, description: "Exactly match the raw header text mapping to state/jurisdiction ST label." },
+            miles_column: { type: Type.STRING, description: "Exactly match the raw header text mapping to distance or traveling odometer miles." },
+            gallons_column: { type: Type.STRING, description: "Exactly match the raw header text mapping to fuel gallons purchased or volumes consumed." },
+            date_column: { type: Type.STRING, description: "Exactly match the raw header text mapping to dates of transactions." },
+            vendor_column: { type: Type.STRING, description: "Exactly match the raw header text mapping to vendor/merchant fuel stop identifiers." }
+          },
+          required: ["unit_number_column", "state_column", "miles_column", "gallons_column", "date_column", "vendor_column"]
+        }
+      }
+    });
+
+    const parsedData = JSON.parse(response.text || "{}");
+    res.json({ ...parsedData, simulated: false });
+  } catch (error: any) {
+    console.error("AI Smart CSV Map failed:", error);
+    res.status(500).json({ error: error?.message || "Internal server error occurred during AI CSV smart header mapping" });
+  }
+});
+
 // Configure Vite middleware in development
 async function startServer() {
   if (process.env.NODE_ENV !== "production") {
