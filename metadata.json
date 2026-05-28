@@ -1,0 +1,6 @@
+{
+  "name": "IFTA Pro Fleet Tax Platform",
+  "description": "An International Fuel Tax Agreement (IFTA) software platform for fleet mileage tracking, fuel transaction auditing, and AI-powered tax compliance risk analysis.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
