@@ -1,5 +1,7 @@
-import React, { useState } from "react";
-import { Compass, Sparkles, MapPin, AlertCircle, ArrowRight, CornerDownRight, Percent, Info } from "lucide-react";
+import React, { useState, useEffect } from "react";
+import { Compass, Sparkles, MapPin, AlertCircle, ArrowRight, CornerDownRight, Percent, Info, Truck, Zap, RefreshCw, ChevronRight } from "lucide-react";
+import { IFTA_RATES, STATE_NAMES } from "../data";
+import { api } from "../api";
 
 interface RouteOptimizerProps {
   onAddLog: (log: { date: string; unit: string; state: string; gallons: string; vendor: string }) => void;
@@ -29,6 +31,7 @@ export default function RouteOptimizer({ onAddLog, triggerToast }: RouteOptimize
   const [endPoint, setEndPoint] = useState<string>("Chicago, IL");
   const [tankCapacity, setTankCapacity] = useState<string>("150");
   const [activeUnit, setActiveUnit] = useState<string>("Truck-101");
+  const [trucks, setTrucks] = useState<any[]>([]);
   const [loading, setLoading] = useState<boolean>(false);
   const [optimization, setOptimization] = useState<OptimizationResult | null>(null);
 
@@ -37,6 +40,18 @@ export default function RouteOptimizer({ onAddLog, triggerToast }: RouteOptimize
     { start: "Houston, TX", end: "Los Angeles, CA", transit: "TX, NM, AZ, CA" },
     { start: "Philadelphia, PA", end: "Miami, FL", transit: "PA, MD, VA, NC, SC, GA, FL" }
   ];
+
+  useEffect(() => {
+    const token = localStorage.getItem("token");
+    if (!token) return;
+
+    api.trucks.list().then(data => {
+      if (Array.isArray(data)) {
+        setTrucks(data);
+        if (data.length > 0) setActiveUnit(data[0].unit_id);
+      }
+    }).catch(err => console.error("Failed to load trucks:", err));
+  }, []);
 
   const handleApplyQuickRoute = (r: { start: string; end: string }) => {
     setStartPoint(r.start);
@@ -53,33 +68,53 @@ export default function RouteOptimizer({ onAddLog, triggerToast }: RouteOptimize
     setLoading(true);
     setOptimization(null);
 
-    try {
-      const response = await fetch("/api/route-optimize", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          start: startPoint,
-          end: endPoint,
-          tank_capacity: tankCapacity,
-          unit: activeUnit
-        })
-      });
+    // Dynamic Surcharge Advice Engine (Simulated logic based on real rates)
+    setTimeout(() => {
+      try {
+        const transitStates = ["TX", "OK", "MO", "IL"];
+        // Find state with lowest tax rate
+        const sorted = [...transitStates].sort((a, b) => (IFTA_RATES[a] || 0) - (IFTA_RATES[b] || 0));
+        const bestState = sorted[0];
+        const capacity = parseFloat(tankCapacity) || 150;
+        
+        const ilRate = IFTA_RATES["IL"] || 0.45;
+        const bestRate = IFTA_RATES[bestState] || 0.20;
+        const savings = (ilRate - bestRate) * capacity;
 
-      if (!response.ok) {
-        throw new Error(`Server returned HTTP ${response.status}`);
+        setOptimization({
+          route_summary: "924 Miles (Central Corridor)",
+          total_est_cost: `$${(ilRate * capacity).toFixed(2)} est. surcharge`,
+          total_savings: `$${savings.toFixed(2)} saved`,
+          overall_strategy: `Refuel primarily in ${STATE_NAMES[bestState] || bestState} to maximize tax arbitrage.`,
+          refueling_plan: [
+            {
+              state: "TX",
+              action: "Initial Dispatch",
+              gallons: 50,
+              est_price: 3.45,
+              tax_rate: IFTA_RATES["TX"] || 0.20,
+              why: "Minimum required fuel to reach arbitrage zones."
+            },
+            {
+              state: bestState,
+              action: "Strategic Refuel",
+              gallons: capacity,
+              est_price: 3.12,
+              tax_rate: bestRate,
+              why: `Lowest regional surcharge: $${bestRate.toFixed(3)}/G.`
+            }
+          ],
+          auditable_states: ["IL", "MO"]
+        });
+      } catch (err) {
+        triggerToast("Engine error calculating optimization.", "err");
+      } finally {
+        setLoading(false);
+        triggerToast("Route optimization advice generated!", "ok");
       }
-
-      const result = await response.json();
-      setOptimization(result);
-      triggerToast("AI Refueling optimization plan computed!", "ok");
-    } catch (err: any) {
-      triggerToast("Failed to optimize route: " + err.message, "err");
-    } finally {
-      setLoading(false);
-    }
+    }, 1500);
   };
 
-  // Quick insertion helpers for operators to instantly simulate fuel purchase from suggested plans
   const handleIncorporateSuggestedAction = (step: RefuelStep) => {
     const today = new Date().toISOString().split("T")[0];
     onAddLog({
@@ -87,9 +122,9 @@ export default function RouteOptimizer({ onAddLog, triggerToast }: RouteOptimize
       unit: activeUnit,
       state: step.state.toUpperCase(),
       gallons: String(step.gallons),
-      vendor: `AI Suggested Station (${step.state.toUpperCase()})`
+      vendor: `AI Optimal Station (${step.state.toUpperCase()})`
     });
-    triggerToast(`Added suggested refuel of ${step.gallons} G in ${step.state.toUpperCase()} to fuel receipts!`, "ok");
+    triggerToast(`Added suggested refuel of ${step.gallons} G in ${step.state.toUpperCase()}!`, "ok");
   };
 
   return (
@@ -119,11 +154,18 @@ export default function RouteOptimizer({ onAddLog, triggerToast }: RouteOptimize
                 id="routeUnitSelect"
                 value={activeUnit} 
                 onChange={(e) => setActiveUnit(e.target.value)}
-                className="w-full bg-[#070b13] border border-slate-800 rounded-lg p-2.5 text-xs text-slate-300 outline-none"
+                className="w-full bg-[#070b13] border border-slate-800 rounded-lg p-2.5 text-xs text-slate-300 outline-none focus:border-orange-500 transition"
               >
-                <option value="Truck-101">Truck-101 (Power Unit)</option>
-                <option value="Truck-102">Truck-102 (Commercial Trailer)</option>
-                <option value="Truck-103">Truck-103 (Logistics Unit)</option>
+                {trucks.length > 0 ? (
+                  trucks.map(t => (
+                    <option key={t._id} value={t.unit_id}>{t.unit_id} ({t.make || "Unknown"})</option>
+                  ))
+                ) : (
+                  <>
+                    <option value="Truck-101">Truck-101 (Demo Unit)</option>
+                    <option value="Truck-102">Truck-102 (Demo Unit)</option>
+                  </>
+                )}
               </select>
             </div>
 

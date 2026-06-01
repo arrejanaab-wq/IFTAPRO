@@ -1,7 +1,7 @@
 import React, { useState } from "react";
 import { TrendingUp, Truck, Shield, AlertTriangle, Coins, RefreshCw, BarChart4, Compass, Info, ArrowUpRight } from "lucide-react";
 import { CalculationResults, UnitCalculatedData } from "../types";
-import { IFTA_RATES } from "../data";
+import { IFTA_RATES, STATE_NAMES } from "../data";
 
 interface FleetAnalyticsProps {
   results: CalculationResults | null;
@@ -206,28 +206,71 @@ export default function FleetAnalytics({ results, tripsCount, fuelCount }: Fleet
 
           </div>
 
-          {/* State Spend density matrix list */}
-          <div className="space-y-3 pt-2">
-            <h3 className="font-display font-medium text-sm text-slate-300">Fuel Expenditure & Taxes by State</h3>
-            <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
-              {Object.entries(stateSpend).map(([st, data]) => {
-                const percentage = totalEstFuelCost > 0 ? (data.spend / totalEstFuelCost) * 100 : 15;
-                return (
-                  <div key={st} className="p-3 bg-slate-950 rounded-xl border border-slate-900 space-y-2 flex flex-col justify-between">
-                    <div className="flex justify-between items-center border-b border-slate-900 pb-1.5">
-                      <span className="font-mono font-bold text-white text-xs bg-slate-900 border border-slate-800 px-2 rounded">{st}</span>
-                      <span className="text-[10px] text-slate-500 font-mono text-right">{data.count} purchases</span>
-                    </div>
-                    <div className="space-y-0.5">
-                      <span className="text-[11px] block font-mono font-black text-slate-200">${data.spend.toLocaleString(undefined, { maximumFractionDigits: 2 })}</span>
-                      <span className="text-[10px] block text-slate-500 font-semibold">{data.gallons.toFixed(1)} Gal loaded</span>
-                    </div>
-                    <div className="w-full bg-slate-900 rounded-full h-1 overflow-hidden">
-                      <div className="bg-orange-500 h-full" style={{ width: `${percentage}%` }}></div>
-                    </div>
-                  </div>
-                );
-              })}
+          {/* ── JURISDICTIONAL EXPENDITURE LEDGER ── */}
+          <div className="bg-slate-950/40 border border-slate-900 rounded-2xl overflow-hidden">
+            <div className="p-4 border-b border-slate-900 bg-slate-900/40">
+              <h3 className="text-xs font-bold text-slate-400 uppercase tracking-widest flex items-center gap-2">
+                <Coins className="w-4 h-4 text-emerald-500" />
+                Detailed Jurisdictional Expenditure & Tax Ledger
+              </h3>
+            </div>
+            <div className="overflow-x-auto">
+              <table className="w-full text-left">
+                <thead>
+                  <tr className="bg-slate-950/60 text-[10px] text-slate-500 uppercase font-black tracking-widest">
+                    <th className="px-5 py-3">Jurisdiction</th>
+                    <th className="px-5 py-3 text-right">Distance (mi)</th>
+                    <th className="px-5 py-3 text-right">Tax Owed</th>
+                    <th className="px-5 py-3 text-right">Tax Paid</th>
+                    <th className="px-5 py-3 text-right">Net Surcharge</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-900 text-xs font-sans">
+                  {results ? (() => {
+                    const stateTotals: any = {};
+                    Object.values(results).forEach((unit: any) => {
+                      Object.entries(unit.stateResults).forEach(([st, data]: [string, any]) => {
+                        if (!stateTotals[st]) stateTotals[st] = { mi: 0, owed: 0, paid: 0, net: 0 };
+                        stateTotals[st].mi += data.mi;
+                        stateTotals[st].owed += data.owed;
+                        stateTotals[st].paid += data.paid;
+                        stateTotals[st].net += data.net;
+                      });
+                    });
+
+                    return Object.entries(stateTotals)
+                      .sort((a: any, b: any) => Math.abs(b[1].net) - Math.abs(a[1].net))
+                      .map(([st, data]: [string, any]) => (
+                        <tr key={st} className="hover:bg-slate-900/40 text-slate-300">
+                          <td className="px-5 py-3">
+                            <div className="flex items-center gap-2">
+                              <span className="bg-slate-900 border border-slate-800 rounded px-1.5 py-0.5 font-mono text-[10px] font-bold text-white">{st}</span>
+                              <span className="text-[11px] text-slate-400">{STATE_NAMES[st] || "Unknown"}</span>
+                            </div>
+                          </td>
+                          <td className="px-5 py-3 text-right font-mono text-slate-400">{data.mi.toLocaleString()}</td>
+                          <td className="px-5 py-3 text-right font-mono text-red-400/80">${data.owed.toFixed(2)}</td>
+                          <td className="px-5 py-3 text-right font-mono text-emerald-400/80">${data.paid.toFixed(2)}</td>
+                          <td className="px-5 py-3 text-right">
+                            <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold border ${
+                              data.net >= 0 
+                                ? "bg-red-500/10 text-red-400 border-red-500/20" 
+                                : "bg-emerald-500/10 text-emerald-400 border-emerald-500/20"
+                            }`}>
+                              {data.net >= 0 ? `+$${data.net.toFixed(2)}` : `-$${Math.abs(data.net).toFixed(2)}`}
+                            </span>
+                          </td>
+                        </tr>
+                      ));
+                  })() : (
+                    <tr>
+                      <td colSpan={5} className="px-5 py-12 text-center text-slate-500 italic">
+                        Initialize calculations to view detailed state-by-state expenditures.
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
             </div>
           </div>
 

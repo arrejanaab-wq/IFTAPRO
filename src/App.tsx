@@ -1,4 +1,5 @@
 import React, { useState, useRef, useEffect } from "react";
+import * as XLSX from "xlsx";
 import { 
   Truck, 
   Fuel, 
@@ -40,28 +41,11 @@ import RouteOptimizer from "./components/RouteOptimizer";
 import ReceiptScanner from "./components/ReceiptScanner";
 import SmartColumnMapper from "./components/SmartColumnMapper";
 import FleetAnalytics from "./components/FleetAnalytics";
+import TruckManagement from "./components/TruckManagement";
+import LoginModal from "./components/LoginModal";
 
-// Firebase Integration imports
-import { 
-  auth, 
-  db, 
-  googleProvider, 
-  signInWithPopup, 
-  signOut, 
-  OperationType, 
-  handleFirestoreError 
-} from "./firebase";
-import { 
-  doc, 
-  setDoc, 
-  addDoc,
-  collection, 
-  onSnapshot, 
-  writeBatch, 
-  serverTimestamp, 
-  getDocs,
-  getDocFromServer
-} from "firebase/firestore";
+// API Integration imports
+import { api } from "./api";
 
 export default function App() {
   const [tab, setTab] = useState<string>("dashboard");
@@ -73,134 +57,85 @@ export default function App() {
   // Firebase auth & synchronizer state hooks
   const [user, setUser] = useState<any>(null);
   const [authLoading, setAuthLoading] = useState<boolean>(true);
+  const [isLoginModalOpen, setIsLoginModalOpen] = useState<boolean>(false);
+  const [trucks, setTrucks] = useState<any[]>([]);
 
-  // Robust chunked cloud batch writer to prevent Firebase 500 limit violations
-  const writeBatchChunked = async (userUid: string, collectionName: "trips" | "fuel", records: any[]) => {
-    const chunks = [];
-    for (let i = 0; i < records.length; i += 400) {
-      chunks.push(records.slice(i, i + 400));
-    }
-    for (const chunk of chunks) {
-      const batch = writeBatch(db);
-      chunk.forEach((row) => {
-        const docRef = doc(collection(db, "users", userUid, collectionName));
-        batch.set(docRef, {
-          unit: row.unit || "Unknown",
-          state: (row.state || "TX").toUpperCase().slice(0, 2),
-          miles: row.miles ? String(row.miles) : undefined,
-          gallons: row.gallons ? String(row.gallons) : undefined,
-          date: row.date || new Date().toISOString().split("T")[0],
-          vendor: row.vendor || undefined,
-          price_per_gal: row.price_per_gal !== undefined ? Number(row.price_per_gal) : undefined,
-          createdAt: serverTimestamp()
-        });
-      });
-      await batch.commit();
-    }
-  };
-
-  // Listen to Auth State changes & self-register users under /users/{uid}
+  // Listen to Auth State changes & self-register users
   useEffect(() => {
-    const unsubscribe = auth.onAuthStateChanged(async (currentUser) => {
-      setUser(currentUser);
-      setAuthLoading(false);
-      
-      if (currentUser) {
-        try {
-          const userDocRef = doc(db, "users", currentUser.uid);
-          const userDoc = await getDocFromServer(userDocRef).catch(() => null);
-          
-          if (!userDoc || !userDoc.exists()) {
-            await setDoc(userDocRef, {
-              email: currentUser.email || "",
-              displayName: currentUser.displayName || currentUser.email?.split("@")[0] || "User",
-              createdAt: serverTimestamp(),
-              updatedAt: serverTimestamp()
-            });
-          }
-        } catch (error) {
-          console.error("Auto registration synced error: ", error);
+    const token = localStorage.getItem("token");
+    if (token) {
+      api.auth.me().then((data) => {
+        if (data.error) {
+          localStorage.removeItem("token");
+          setUser(null);
+        } else {
+          setUser(data);
         }
-      }
-    });
-
-    return () => unsubscribe();
+        setAuthLoading(false);
+      }).catch(() => {
+        setAuthLoading(false);
+      });
+    } else {
+      setAuthLoading(false);
+    }
   }, []);
 
-  // Sync state with cloud database in real-time if signed in
+  // Sync state with cloud database if signed in
   useEffect(() => {
-    if (!user) {
-      // In guest sandbox mode, do not register snapshot observers, keeping existing loaded state
-      return;
-    }
+    if (!user) return;
 
-    const tripsCol = collection(db, "users", user.uid, "trips");
-    const unsubscribeTrips = onSnapshot(tripsCol, (snapshot) => {
-      const loadedTrips: TripRecord[] = [];
-      snapshot.forEach((doc) => {
-        const d = doc.data();
-        loadedTrips.push({
-          id: doc.id,
-          unit: d.unit || "N/A",
-          state: d.state || "TX",
-          miles: d.miles !== undefined ? d.miles : "0",
-          date: d.date || ""
-        } as TripRecord);
-      });
-      setTrips(loadedTrips);
-    }, (error) => {
-      handleFirestoreError(error, OperationType.LIST, `users/${user.uid}/trips`);
-    });
-
-    const fuelCol = collection(db, "users", user.uid, "fuel");
-    const unsubscribeFuel = onSnapshot(fuelCol, (snapshot) => {
-      const loadedFuel: FuelRecord[] = [];
-      snapshot.forEach((doc) => {
-        const d = doc.data();
-        loadedFuel.push({
-          id: doc.id,
-          unit: d.unit || "N/A",
-          state: d.state || "TX",
-          gallons: d.gallons !== undefined ? d.gallons : "0",
-          date: d.date || "",
-          vendor: d.vendor || "Standard Terminal",
-          price_per_gal: d.price_per_gal !== undefined ? d.price_per_gal : 3.45
-        } as FuelRecord);
-      });
-      setFuel(loadedFuel);
-    }, (error) => {
-      handleFirestoreError(error, OperationType.LIST, `users/${user.uid}/fuel`);
-    });
-
-    return () => {
-      unsubscribeTrips();
-      unsubscribeFuel();
+    const loadData = async () => {
+      try {
+        const [loadedTrips, loadedFuel, loadedTrucks] = await Promise.all([
+          api.trips.list(),
+          api.fuel.list(),
+          api.trucks.list()
+        ]);
+        setTrips(loadedTrips);
+        setFuel(loadedFuel);
+        setTrucks(loadedTrucks);
+      } catch (error) {
+        console.error("Error loading data:", error);
+      }
     };
+
+    loadData();
   }, [user]);
 
   // Auth Operations
   const handleSignIn = async () => {
+    setIsLoginModalOpen(true);
+  };
+
+  const handleAuthSuccess = (user: any, token: string) => {
+    localStorage.setItem("token", token);
+    setUser(user);
+    setIsLoginModalOpen(false);
+  };
+
+  const handleGoogleSignIn = async (response: any) => {
     try {
-      await signInWithPopup(auth, googleProvider);
-      triggerToast("Signed in successfully!", "ok");
+      const data = await api.auth.google(response.credential);
+      if (data.token) {
+        localStorage.setItem("token", data.token);
+        setUser(data.user);
+        triggerToast("Signed in with Google successfully!", "ok");
+      }
     } catch (error: any) {
-      triggerToast("Google sign-in abort or error: " + error.message, "err");
+      triggerToast("Google sign-in error: " + error.message, "err");
     }
   };
 
   const handleSignOut = async () => {
-    try {
-      await signOut(auth);
-      setTrips([]);
-      setFuel([]);
-      setResults(null);
-      setAnomalies(null);
-      setFuelCardLoaded(false);
-      setUploadMsg({ trip: "", fuel: "" });
-      triggerToast("Signed out. Reverted to local Guest sandbox.", "ok");
-    } catch (error: any) {
-      triggerToast("Google sign-out failed: " + error.message, "err");
-    }
+    localStorage.removeItem("token");
+    setUser(null);
+    setTrips([]);
+    setFuel([]);
+    setResults(null);
+    setAnomalies(null);
+    setFuelCardLoaded(false);
+    setUploadMsg({ trip: "", fuel: "" });
+    triggerToast("Signed out. Reverted to local Guest sandbox.", "ok");
   };
 
   const [activeUnit, setActiveUnit] = useState<string>("all");
@@ -250,19 +185,19 @@ export default function App() {
   const handleAddFuelDirect = async (record: { date: string; unit: string; state: string; gallons: string; vendor: string }) => {
     if (user) {
       try {
-        const fuelCol = collection(db, "users", user.uid, "fuel");
-        await addDoc(fuelCol, {
+        await api.fuel.create({
           unit: record.unit,
           state: record.state.toUpperCase().slice(0, 2),
           gallons: String(record.gallons),
           date: record.date || new Date().toISOString().split("T")[0],
           vendor: record.vendor || "Standard Terminal",
-          price_per_gal: 3.45,
-          createdAt: serverTimestamp()
+          price_per_gal: 3.45
         });
+        const nextFuel = await api.fuel.list();
+        setFuel(nextFuel);
         triggerToast("Fuel ticket added & synced to Cloud!", "ok");
       } catch (error) {
-        handleFirestoreError(error, OperationType.CREATE, `users/${user.uid}/fuel`);
+        console.error("Error adding fuel:", error);
       }
     } else {
       const freshFuel: FuelRecord = {
@@ -311,11 +246,13 @@ export default function App() {
     if (activeMapperType === "trip") {
       if (user) {
         try {
-          await writeBatchChunked(user.uid, "trips", normalized);
+          await Promise.all(normalized.map(t => api.trips.create(t)));
+          const nextTrips = await api.trips.list();
+          setTrips(nextTrips);
           setUploadMsg((u) => ({ ...u, trip: `✅ ${normalized.length} trip rows synced` }));
           triggerToast(`Successfully synced ${normalized.length} trips to Cloud!`);
         } catch (error) {
-          handleFirestoreError(error, OperationType.WRITE, `users/${user.uid}/trips`);
+          console.error("Error syncing trips:", error);
         }
       } else {
         setTrips((prev) => [...prev, ...normalized]);
@@ -325,11 +262,13 @@ export default function App() {
     } else {
       if (user) {
         try {
-          await writeBatchChunked(user.uid, "fuel", normalized);
+          await Promise.all(normalized.map(f => api.fuel.create(f)));
+          const nextFuel = await api.fuel.list();
+          setFuel(nextFuel);
           setUploadMsg((u) => ({ ...u, fuel: `✅ ${normalized.length} transactions synced` }));
           triggerToast(`Successfully synced ${normalized.length} fuel tickets to Cloud!`);
         } catch (error) {
-          handleFirestoreError(error, OperationType.WRITE, `users/${user.uid}/fuel`);
+          console.error("Error syncing fuel:", error);
         }
       } else {
         setFuel((prev) => [...prev, ...normalized]);
@@ -344,22 +283,37 @@ export default function App() {
     setActiveMapperType(null);
   };
 
-  // Drag and drop logic
+  // Drag and drop or Browse logic
   const handleFile = (file: File, type: "trip" | "fuel") => {
     if (!file) return;
-    if (!file.name.endsWith(".csv")) {
-      triggerToast("Invalid format. Please upload a structured .csv spreadsheets.", "err");
+
+    const fileName = file.name.toLowerCase();
+    const isCSV = fileName.endsWith(".csv");
+    const isExcel = fileName.endsWith(".xlsx") || fileName.endsWith(".xls");
+
+    if (!isCSV && !isExcel) {
+      triggerToast("Invalid format. Please upload .csv or .xlsx spreadsheets.", "err");
       return;
     }
 
     const reader = new FileReader();
     reader.onload = async (e) => {
       try {
-        const text = e.target?.result as string;
-        const parsed = parseCSV(text);
+        let parsed: any[] = [];
+
+        if (isExcel) {
+          const bstr = e.target?.result;
+          const wb = XLSX.read(bstr, { type: "binary" });
+          const wsname = wb.SheetNames[0];
+          const ws = wb.Sheets[wsname];
+          parsed = XLSX.utils.sheet_to_json(ws);
+        } else {
+          const text = e.target?.result as string;
+          parsed = parseCSV(text);
+        }
         
         if (parsed.length === 0) {
-          triggerToast("CSV parsed 0 rows. Please verify column headings.", "err");
+          triggerToast("File parsed 0 rows. Please verify content.", "err");
           return;
         }
 
@@ -399,11 +353,13 @@ export default function App() {
           if (type === "trip") {
             if (user) {
               try {
-                await writeBatchChunked(user.uid, "trips", normalized);
+                await Promise.all(normalized.map(t => api.trips.create(t)));
+                const nextTrips = await api.trips.list();
+                setTrips(nextTrips);
                 setUploadMsg((u) => ({ ...u, trip: `✅ ${normalized.length} trip rows synced` }));
                 triggerToast(`Successfully uploaded & synced ${normalized.length} trip logs to Cloud!`, "ok");
               } catch (error) {
-                handleFirestoreError(error, OperationType.WRITE, `users/${user.uid}/trips`);
+                console.error("Error uploading trips:", error);
               }
             } else {
               setTrips((prev) => [...prev, ...normalized]);
@@ -413,11 +369,13 @@ export default function App() {
           } else {
             if (user) {
               try {
-                await writeBatchChunked(user.uid, "fuel", normalized);
+                await Promise.all(normalized.map(f => api.fuel.create(f)));
+                const nextFuel = await api.fuel.list();
+                setFuel(nextFuel);
                 setUploadMsg((u) => ({ ...u, fuel: `✅ ${normalized.length} fuel records synced` }));
                 triggerToast(`Successfully uploaded & synced ${normalized.length} fuel invoices to Cloud!`, "ok");
               } catch (error) {
-                handleFirestoreError(error, OperationType.WRITE, `users/${user.uid}/fuel`);
+                console.error("Error uploading fuel:", error);
               }
             } else {
               setFuel((prev) => [...prev, ...normalized]);
@@ -642,25 +600,34 @@ export default function App() {
     }
   };
 
+  const validateTruck = (unitId: string) => {
+    return trucks.some(t => t.unit_id === unitId);
+  };
+
   const addManualTripRecord = async () => {
     if (!manualTrip.unit || !manualTrip.miles || isNaN(parseFloat(manualTrip.miles))) {
       triggerToast("Please provide valid Truck ID and distance miles numerical.", "err");
       return;
     }
+    if (user && !validateTruck(manualTrip.unit)) {
+      triggerToast(`Unit ${manualTrip.unit} is not registered. Please add it in Fleet Assets first.`, "err");
+      return;
+    }
+
     if (user) {
       try {
-        const tripsCol = collection(db, "users", user.uid, "trips");
-        await addDoc(tripsCol, {
+        await api.trips.create({
           unit: manualTrip.unit,
           state: manualTrip.state.toUpperCase().slice(0, 2),
           miles: String(manualTrip.miles),
-          date: manualTrip.date || new Date().toISOString().split("T")[0],
-          createdAt: serverTimestamp()
+          date: manualTrip.date || new Date().toISOString().split("T")[0]
         });
+        const nextTrips = await api.trips.list();
+        setTrips(nextTrips);
         setManualTrip({ unit: "", state: "TX", miles: "", date: "" });
-        triggerToast("Trip recorded on Firebase Cloud!", "ok");
+        triggerToast("Trip recorded on MongoDB Cloud!", "ok");
       } catch (error) {
-        handleFirestoreError(error, OperationType.CREATE, `users/${user.uid}/trips`);
+        console.error("Error adding trip:", error);
       }
     } else {
       setTrips((prev) => [...prev, { ...manualTrip }]);
@@ -674,22 +641,27 @@ export default function App() {
       triggerToast("Please input valid Truck ID and gallons volume numerical.", "err");
       return;
     }
+    if (user && !validateTruck(manualFuel.unit)) {
+      triggerToast(`Unit ${manualFuel.unit} is not registered. Please add it in Fleet Assets first.`, "err");
+      return;
+    }
+
     if (user) {
       try {
-        const fuelCol = collection(db, "users", user.uid, "fuel");
-        await addDoc(fuelCol, {
+        await api.fuel.create({
           unit: manualFuel.unit,
           state: manualFuel.state.toUpperCase().slice(0, 2),
           gallons: String(manualFuel.gallons),
           date: manualFuel.date || new Date().toISOString().split("T")[0],
           vendor: "Standard Terminal",
-          price_per_gal: 3.45,
-          createdAt: serverTimestamp()
+          price_per_gal: 3.45
         });
+        const nextFuel = await api.fuel.list();
+        setFuel(nextFuel);
         setManualFuel({ unit: "", state: "TX", gallons: "", date: "" });
-        triggerToast("Fuel transaction recorded on Firebase Cloud!", "ok");
+        triggerToast("Fuel transaction recorded on MongoDB Cloud!", "ok");
       } catch (error) {
-        handleFirestoreError(error, OperationType.CREATE, `users/${user.uid}/fuel`);
+        console.error("Error adding fuel:", error);
       }
     } else {
       setFuel((prev) => [...prev, { ...manualFuel }]);
@@ -701,52 +673,11 @@ export default function App() {
   const triggerClearAll = async () => {
     if (user) {
       try {
-        // Clear trips and fuel
-        const tripsCol = collection(db, "users", user.uid, "trips");
-        const fuelCol = collection(db, "users", user.uid, "fuel");
-        
-        const tripsSnapshot = await getDocs(tripsCol);
-        const fuelSnapshot = await getDocs(fuelCol);
-
-        const tripBatches = [];
-        let currentBatch = writeBatch(db);
-        let count = 0;
-        tripsSnapshot.forEach((docSnapshot) => {
-          currentBatch.delete(docSnapshot.ref);
-          count++;
-          if (count === 400) {
-            tripBatches.push(currentBatch);
-            currentBatch = writeBatch(db);
-            count = 0;
-          }
-        });
-        if (count > 0) tripBatches.push(currentBatch);
-        for (const b of tripBatches) {
-          await b.commit();
-        }
-
-        const fuelBatches = [];
-        currentBatch = writeBatch(db);
-        count = 0;
-        fuelSnapshot.forEach((docSnapshot) => {
-          currentBatch.delete(docSnapshot.ref);
-          count++;
-          if (count === 400) {
-            fuelBatches.push(currentBatch);
-            currentBatch = writeBatch(db);
-            count = 0;
-          }
-        });
-        if (count > 0) fuelBatches.push(currentBatch);
-        for (const b of fuelBatches) {
-          await b.commit();
-        }
-
-        setFuelCardLoaded(false);
-        setUploadMsg({ trip: "", fuel: "" });
-        triggerToast("All Cloud databases cleared successfully.", "ok");
+        // In a real app, you might have a dedicated "clear all" endpoint
+        // For now, we'll delete them one by one or just inform the user
+        triggerToast("Clear All not fully implemented for API yet. Please delete individual records or wait for bulk endpoint.", "err");
       } catch (error) {
-        handleFirestoreError(error, OperationType.DELETE, `users/${user.uid}`);
+        console.error("Error clearing data:", error);
       }
     } else {
       setTrips([]);
@@ -755,7 +686,7 @@ export default function App() {
       setAnomalies(null);
       setFuelCardLoaded(false);
       setUploadMsg({ trip: "", fuel: "" });
-      triggerToast("All databases cleared successfully.");
+      triggerToast("All local databases cleared successfully.");
     }
   };
 
@@ -898,6 +829,7 @@ export default function App() {
         <div className="max-w-7xl mx-auto px-6 overflow-x-auto flex gap-1.5 py-2.5 scrollbar-thin scrollbar-thumb-slate-800">
           {[
             { id: "dashboard", label: "Dashboard" },
+            { id: "assets", label: "🚛 Fleet Assets" },
             { id: "analytics", label: "📊 Fleet Intelligence" },
             { id: "optimization", label: "🌎 Route Surcharges" },
             { id: "ocr", label: "📸 Receipt OCR" },
@@ -908,8 +840,8 @@ export default function App() {
             { id: "rates", label: "Diesel Tax Rates" },
             { id: "results", label: "Calculation Results" },
             { id: "ai", label: "AI Audit & Risks" },
-            { id: "billing", label: "💰 SaaS Billing" }
-          ].map((item) => {
+            { id: "billing", label: "💰 SaaS Billing", role: "owner" }
+          ].filter(item => !item.role || (user && user.role === item.role)).map((item) => {
             const isActive = tab === item.id;
             return (
               <button
@@ -1076,6 +1008,17 @@ Truck-102,   IL,    92.00,   2026-04-03
               </div>
             </div>
           </div>
+        )}
+
+        {/* ════ FLEET ASSETS ════ */}
+        {tab === "assets" && (
+          <TruckManagement 
+            triggerToast={triggerToast} 
+            onTrucksChange={(count) => {
+              // Refresh trucks list to ensure state consistency
+              api.trucks.list().then(setTrucks);
+            }} 
+          />
         )}
 
         {/* SMART COLUMN ALIGNER OVERLAY PANEL */}
@@ -1338,14 +1281,21 @@ Truck-102,   IL,    92.00,   2026-04-03
 
                 <div className="space-y-3.5">
                   <div>
-                    <label className="block text-[11px] text-slate-400 font-bold uppercase tracking-wider mb-1.5" htmlFor="tripUnitId">Truck/Unit Identifier</label>
-                    <input 
+                    <label className="block text-[11px] text-slate-400 font-bold uppercase tracking-wider mb-1.5" htmlFor="tripUnitId">Select Registered Truck</label>
+                    <select 
                       id="tripUnitId"
-                      className="w-full bg-[#070b13] border border-slate-800 focus:border-orange-500/80 rounded-lg px-3 py-2 text-xs text-slate-200 outline-none transition" 
-                      placeholder="e.g. Truck-101" 
+                      className="w-full bg-[#070b13] border border-slate-800 focus:border-orange-500/80 rounded-lg px-3 py-2 text-xs text-slate-200 outline-none transition"
                       value={manualTrip.unit}
                       onChange={(e) => setManualTrip(prev => ({ ...prev, unit: e.target.value }))}
-                    />
+                    >
+                      <option value="" className="bg-slate-950">-- Choose Truck --</option>
+                      {trucks.map(t => (
+                        <option key={t._id} value={t.unit_id} className="bg-slate-950">{t.unit_id} ({t.make})</option>
+                      ))}
+                    </select>
+                    {trucks.length === 0 && (
+                      <p className="text-[10px] text-red-400 mt-1">No trucks registered. Go to "Fleet Assets" first.</p>
+                    )}
                   </div>
 
                   <div className="grid grid-cols-2 gap-3">
@@ -1433,14 +1383,21 @@ Truck-102,   IL,    92.00,   2026-04-03
 
                 <div className="space-y-3.5">
                   <div>
-                    <label className="block text-[11px] text-slate-400 font-bold uppercase tracking-wider mb-1.5" htmlFor="fuelUnitId">Truck/Unit Identifier</label>
-                    <input 
+                    <label className="block text-[11px] text-slate-400 font-bold uppercase tracking-wider mb-1.5" htmlFor="fuelUnitId">Select Registered Truck</label>
+                    <select 
                       id="fuelUnitId"
-                      className="w-full bg-[#070b13] border border-slate-800 focus:border-blue-500/80 rounded-lg px-3 py-2 text-xs text-slate-200 outline-none transition" 
-                      placeholder="e.g. Truck-101" 
+                      className="w-full bg-[#070b13] border border-slate-800 focus:border-blue-500/80 rounded-lg px-3 py-2 text-xs text-slate-200 outline-none transition"
                       value={manualFuel.unit}
                       onChange={(e) => setManualFuel(prev => ({ ...prev, unit: e.target.value }))}
-                    />
+                    >
+                      <option value="" className="bg-slate-950">-- Choose Truck --</option>
+                      {trucks.map(t => (
+                        <option key={t._id} value={t.unit_id} className="bg-slate-950">{t.unit_id} ({t.make})</option>
+                      ))}
+                    </select>
+                    {trucks.length === 0 && (
+                      <p className="text-[10px] text-red-400 mt-1">No trucks registered. Go to "Fleet Assets" first.</p>
+                    )}
                   </div>
 
                   <div className="grid grid-cols-2 gap-3">
@@ -2244,6 +2201,13 @@ Truck-102,   IL,    92.00,   2026-04-03
           <span>{toast.msg}</span>
         </div>
       )}
+
+      <LoginModal 
+        isOpen={isLoginModalOpen} 
+        onClose={() => setIsLoginModalOpen(false)} 
+        onSuccess={handleAuthSuccess}
+        triggerToast={triggerToast}
+      />
 
       {/* FOOTER METRICS AND METADATA */}
       <footer className="border-t border-slate-800/80 mt-20 pt-6 px-6 max-w-7xl mx-auto flex flex-col sm:flex-row items-center justify-between text-[11px] text-slate-500 gap-4">

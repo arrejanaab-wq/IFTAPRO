@@ -2,11 +2,213 @@ import express from "express";
 import path from "path";
 import { GoogleGenAI, Type } from "@google/genai";
 import { createServer as createViteServer } from "vite";
+import mongoose from "mongoose";
+import jwt from "jsonwebtoken";
+import bcrypt from "bcrypt";
+import cookieParser from "cookie-parser";
+import { OAuth2Client } from "google-auth-library";
+import dotenv from "dotenv";
+import { User, Trip, Fuel, Truck } from "./models";
+
+dotenv.config();
 
 const app = express();
-const PORT = 3000;
+const PORT = Number(process.env.PORT) || 3000;
+const JWT_SECRET = process.env.JWT_SECRET || "default_secret";
+const googleClient = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
 
 app.use(express.json());
+app.use(cookieParser());
+
+// MongoDB Connection
+mongoose.connect(process.env.MONGODB_URI || "mongodb://localhost:27017/iftapro")
+  .then(() => console.log("Connected to MongoDB"))
+  .catch(err => console.error("MongoDB connection error:", err));
+
+// --- Auth Middleware ---
+const authenticateToken = (req: any, res: any, next: any) => {
+  const token = req.headers['authorization']?.split(' ')[1] || req.cookies.token;
+  if (!token) return res.status(401).json({ error: "Access denied. No token provided." });
+
+  try {
+    const decoded = jwt.verify(token, JWT_SECRET);
+    req.user = decoded;
+    next();
+  } catch (ex) {
+    res.status(400).json({ error: "Invalid token." });
+  }
+};
+
+const authorizeRole = (roles: string[]) => {
+  return (req: any, res: any, next: any) => {
+    if (!roles.includes(req.user.role)) {
+      return res.status(403).json({ error: "Access denied. Insufficient permissions." });
+    }
+    next();
+  };
+};
+
+// --- Auth Routes ---
+app.post("/api/auth/register", async (req, res) => {
+  try {
+    const { email, password, displayName, role } = req.body;
+    const existingUser = await User.findOne({ email });
+    if (existingUser) return res.status(400).json({ error: "User already registered." });
+
+    const hashedPassword = await bcrypt.hash(password, 10);
+    const fleetId = new mongoose.Types.ObjectId().toString(); // New fleet for new owner
+
+    const user = new User({
+      email,
+      password: hashedPassword,
+      displayName,
+      role: role || 'owner',
+      fleetId
+    });
+
+    await user.save();
+    const token = jwt.sign({ id: user._id, email: user.email, role: user.role, fleetId: user.fleetId }, JWT_SECRET);
+    res.json({ token, user: { email: user.email, displayName: user.displayName, role: user.role, fleetId: user.fleetId } });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.post("/api/auth/login", async (req, res) => {
+  try {
+    const { email, password } = req.body;
+    const user = await User.findOne({ email });
+    if (!user || !user.password) return res.status(400).json({ error: "Invalid email or password." });
+
+    const validPassword = await bcrypt.compare(password, user.password);
+    if (!validPassword) return res.status(400).json({ error: "Invalid email or password." });
+
+    const token = jwt.sign({ id: user._id, email: user.email, role: user.role, fleetId: user.fleetId }, JWT_SECRET);
+    res.json({ token, user: { email: user.email, displayName: user.displayName, role: user.role, fleetId: user.fleetId } });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.post("/api/auth/google", async (req, res) => {
+  try {
+    const { credential } = req.body;
+    const ticket = await googleClient.verifyIdToken({
+      idToken: credential,
+      audience: process.env.GOOGLE_CLIENT_ID
+    });
+    const payload = ticket.getPayload();
+    if (!payload) return res.status(400).json({ error: "Invalid Google token" });
+
+    let user = await User.findOne({ email: payload.email });
+    if (!user) {
+      user = new User({
+        email: payload.email,
+        googleId: payload.sub,
+        displayName: payload.name,
+        role: 'owner',
+        fleetId: new mongoose.Types.ObjectId().toString()
+      });
+      await user.save();
+    }
+
+    const token = jwt.sign({ id: user._id, email: user.email, role: user.role, fleetId: user.fleetId }, JWT_SECRET);
+    res.json({ token, user: { email: user.email, displayName: user.displayName, role: user.role, fleetId: user.fleetId } });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.get("/api/auth/me", authenticateToken, async (req: any, res) => {
+  try {
+    const user = await User.findById(req.user.id).select("-password");
+    res.json(user);
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// --- OCR Proxy Route ---
+app.post("/api/ocr-receipt", authenticateToken, async (req: any, res) => {
+  try {
+    const { base64Image } = req.body;
+    if (!base64Image) return res.status(400).json({ error: "Missing base64Image" });
+
+    const formData = new URLSearchParams();
+    formData.append("base64Image", base64Image);
+    formData.append("apikey", process.env.OCR_SPACE_KEY || "");
+    formData.append("isOverlayRequired", "false");
+    formData.append("OCREngine", "2");
+
+    const response = await fetch("https://api.ocr.space/parse/image", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: formData,
+    });
+
+    const result = await response.json();
+    res.json(result);
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// --- Data Routes ---
+app.get("/api/trips", authenticateToken, async (req: any, res) => {
+  try {
+    const trips = await Trip.find({ fleetId: req.user.fleetId });
+    res.json(trips);
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.post("/api/trips", authenticateToken, authorizeRole(['owner', 'dispatcher']), async (req: any, res) => {
+  try {
+    const trip = new Trip({ ...req.body, fleetId: req.user.fleetId });
+    await trip.save();
+    res.json(trip);
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.delete("/api/trips/:id", authenticateToken, authorizeRole(['owner', 'dispatcher']), async (req: any, res) => {
+  try {
+    await Trip.findOneAndDelete({ _id: req.params.id, fleetId: req.user.fleetId });
+    res.json({ success: true });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.get("/api/fuel", authenticateToken, async (req: any, res) => {
+  try {
+    const fuel = await Fuel.find({ fleetId: req.user.fleetId });
+    res.json(fuel);
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.post("/api/fuel", authenticateToken, authorizeRole(['owner', 'dispatcher']), async (req: any, res) => {
+  try {
+    const fuel = new Fuel({ ...req.body, fleetId: req.user.fleetId });
+    await fuel.save();
+    res.json(fuel);
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.delete("/api/fuel/:id", authenticateToken, authorizeRole(['owner', 'dispatcher']), async (req: any, res) => {
+  try {
+    await Fuel.findOneAndDelete({ _id: req.params.id, fleetId: req.user.fleetId });
+    res.json({ success: true });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
 
 // Initialize the modern Gemini API Client with header telemetry
 const ai = new GoogleGenAI({
@@ -16,6 +218,34 @@ const ai = new GoogleGenAI({
       "User-Agent": "aistudio-build",
     },
   },
+});
+
+app.get("/api/trucks", authenticateToken, async (req: any, res) => {
+  try {
+    const trucks = await Truck.find({ fleetId: req.user.fleetId });
+    res.json(trucks);
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.post("/api/trucks", authenticateToken, authorizeRole(['owner']), async (req: any, res) => {
+  try {
+    const truck = new Truck({ ...req.body, fleetId: req.user.fleetId });
+    await truck.save();
+    res.json(truck);
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.delete("/api/trucks/:id", authenticateToken, authorizeRole(['owner']), async (req: any, res) => {
+  try {
+    await Truck.findOneAndDelete({ _id: req.params.id, fleetId: req.user.fleetId });
+    res.json({ success: true });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
 });
 
 // AI Anomaly and Audit Analysis API Proxy Route
