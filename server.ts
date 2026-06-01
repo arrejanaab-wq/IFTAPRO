@@ -624,17 +624,25 @@ async function startServer() {
       appType: "spa",
     });
     app.use(vite.middlewares);
+    
+    app.listen(PORT, "0.0.0.0", () => {
+      console.log(`IFTA Pro Express Server running on port ${PORT}`);
+    });
   } else {
+    // In production (e.g. standard Node server), serve static files
+    // But on Vercel, this part is often skipped as Vercel serves the static files directly
     const distPath = path.join(process.cwd(), "dist");
     app.use(express.static(distPath));
     app.get("*", (req, res) => {
+      // Avoid sending index.html for /api routes in case of mismatch
+      if (req.path.startsWith('/api')) return res.status(404).json({ error: "Not found" });
       res.sendFile(path.join(distPath, "index.html"));
     });
   }
-
-  app.listen(PORT, "0.0.0.0", () => {
-    console.log(`IFTA Pro Express Server running on port ${PORT}`);
-  });
 }
 
-startServer();
+if (process.env.NODE_ENV !== "production") {
+  startServer();
+}
+
+export default app;
