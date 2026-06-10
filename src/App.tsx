@@ -496,28 +496,14 @@ export default function App() {
   const triggerClearTripsOnly = async () => {
     if (user) {
       try {
-        const tripsCol = collection(db, "users", user.uid, "trips");
-        const tripsSnapshot = await getDocs(tripsCol);
-        const tripBatches = [];
-        let currentBatch = writeBatch(db);
-        let count = 0;
-        tripsSnapshot.forEach((docSnapshot) => {
-          currentBatch.delete(docSnapshot.ref);
-          count++;
-          if (count === 400) {
-            tripBatches.push(currentBatch);
-            currentBatch = writeBatch(db);
-            count = 0;
-          }
-        });
-        if (count > 0) tripBatches.push(currentBatch);
-        for (const b of tripBatches) {
-          await b.commit();
+        for (const t of trips) {
+          if ((t as any)._id) await api.trips.delete((t as any)._id);
         }
+        setTrips([]);
         setUploadMsg(p => ({ ...p, trip: "" }));
         triggerToast("Trips cloud records cleared successfully.", "ok");
       } catch (error) {
-        handleFirestoreError(error, OperationType.DELETE, `users/${user.uid}/trips`);
+        triggerToast("Failed to clear trips: " + error, "err");
       }
     } else {
       setTrips([]);
@@ -529,28 +515,14 @@ export default function App() {
   const triggerClearFuelOnly = async () => {
     if (user) {
       try {
-        const fuelCol = collection(db, "users", user.uid, "fuel");
-        const fuelSnapshot = await getDocs(fuelCol);
-        const fuelBatches = [];
-        let currentBatch = writeBatch(db);
-        let count = 0;
-        fuelSnapshot.forEach((docSnapshot) => {
-          currentBatch.delete(docSnapshot.ref);
-          count++;
-          if (count === 400) {
-            fuelBatches.push(currentBatch);
-            currentBatch = writeBatch(db);
-            count = 0;
-          }
-        });
-        if (count > 0) fuelBatches.push(currentBatch);
-        for (const b of fuelBatches) {
-          await b.commit();
+        for (const f of fuel) {
+          if ((f as any)._id) await api.fuel.delete((f as any)._id);
         }
+        setFuel([]);
         setUploadMsg(p => ({ ...p, fuel: "" }));
         triggerToast("Fuel cloud records cleared successfully.", "ok");
       } catch (error) {
-        handleFirestoreError(error, OperationType.DELETE, `users/${user.uid}/fuel`);
+        triggerToast("Failed to clear fuel: " + error, "err");
       }
     } else {
       setFuel([]);
@@ -585,12 +557,16 @@ export default function App() {
 
     if (user) {
       try {
-        await writeBatchChunked(user.uid, "fuel", records);
-        await writeBatchChunked(user.uid, "trips", tripRecords);
+        for (const r of records) await api.fuel.create(r);
+        for (const t of tripRecords) await api.trips.create(t);
+        const newFuel = await api.fuel.list();
+        setFuel(newFuel);
+        const newTrips = await api.trips.list();
+        setTrips(newTrips);
         setFuelCardLoaded(true);
         triggerToast(`⛽ Mapped ${records.length} fuel invoices & parsed ${tripRecords.length} logs strictly on cloud!`, "ok");
       } catch (error) {
-        handleFirestoreError(error, OperationType.WRITE, `users/${user.uid}`);
+        triggerToast("Failed to map test data to cloud: " + error, "err");
       }
     } else {
       setFuel(records);
@@ -1014,9 +990,12 @@ Truck-102,   IL,    92.00,   2026-04-03
         {tab === "assets" && (
           <TruckManagement 
             triggerToast={triggerToast} 
+            isGuest={!user}
+            localTrucks={trucks}
+            setLocalTrucks={setTrucks}
             onTrucksChange={(count) => {
               // Refresh trucks list to ensure state consistency
-              api.trucks.list().then(setTrucks);
+              if (user) api.trucks.list().then(setTrucks);
             }} 
           />
         )}

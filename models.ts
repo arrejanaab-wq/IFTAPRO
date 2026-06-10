@@ -58,7 +58,7 @@ export const User = mongoose.model<IUser>('User', UserSchema);
 export const Trip = mongoose.model<ITrip>('Trip', TripSchema);
 export const Fuel = mongoose.model<IFuel>('Fuel', FuelSchema);
 
-export interface ITruck extends Document {
+export interface ITruck extends Omit<Document, 'model'> {
   unit_id: string;
   make?: string;
   model?: string;

@@ -14,11 +14,14 @@ interface TruckData {
 interface TruckManagementProps {
   triggerToast: (msg: string, type?: "ok" | "err") => void;
   onTrucksChange?: (count: number) => void;
+  isGuest?: boolean;
+  localTrucks?: any[];
+  setLocalTrucks?: (trucks: any[]) => void;
 }
 
-export default function TruckManagement({ triggerToast, onTrucksChange }: TruckManagementProps) {
-  const [trucks, setTrucks] = useState<TruckData[]>([]);
-  const [loading, setLoading] = useState(true);
+export default function TruckManagement({ triggerToast, onTrucksChange, isGuest, localTrucks, setLocalTrucks }: TruckManagementProps) {
+  const [trucks, setTrucks] = useState<TruckData[]>(localTrucks || []);
+  const [loading, setLoading] = useState(!isGuest);
   const [isAdding, setIsAdding] = useState(false);
   const [formData, setFormData] = useState<TruckData>({
     unit_id: '',
@@ -29,6 +32,11 @@ export default function TruckManagement({ triggerToast, onTrucksChange }: TruckM
   });
 
   const loadTrucks = async () => {
+    if (isGuest) {
+      setTrucks(localTrucks || []);
+      setLoading(false);
+      return;
+    }
     try {
       const data = await api.trucks.list();
       setTrucks(data);
@@ -46,6 +54,17 @@ export default function TruckManagement({ triggerToast, onTrucksChange }: TruckM
 
   const handleAddTruck = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isGuest) {
+      const newTruck = { ...formData, _id: Math.random().toString(36).substr(2, 9) };
+      const updated = [...(localTrucks || []), newTruck];
+      if (setLocalTrucks) setLocalTrucks(updated);
+      setTrucks(updated);
+      triggerToast("Truck registered locally!", "ok");
+      setIsAdding(false);
+      setFormData({ unit_id: '', make: '', model: '', year: new Date().getFullYear(), vin: '' });
+      if (onTrucksChange) onTrucksChange(updated.length);
+      return;
+    }
     try {
       await api.trucks.create(formData);
       triggerToast("Truck registered successfully!", "ok");
@@ -59,6 +78,14 @@ export default function TruckManagement({ triggerToast, onTrucksChange }: TruckM
 
   const handleDeleteTruck = async (id: string) => {
     if (!window.confirm("Are you sure you want to remove this truck from your fleet?")) return;
+    if (isGuest) {
+      const updated = (localTrucks || []).filter(t => t._id !== id);
+      if (setLocalTrucks) setLocalTrucks(updated);
+      setTrucks(updated);
+      triggerToast("Truck removed from fleet", "ok");
+      if (onTrucksChange) onTrucksChange(updated.length);
+      return;
+    }
     try {
       await api.trucks.delete(id);
       triggerToast("Truck removed from fleet", "ok");

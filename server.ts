@@ -21,7 +21,9 @@ app.use(express.json());
 app.use(cookieParser());
 
 // MongoDB Connection
-mongoose.connect(process.env.MONGODB_URI || "mongodb://localhost:27017/iftapro")
+mongoose.connect(process.env.MONGODB_URI || "mongodb://localhost:27017/iftapro", {
+  serverSelectionTimeoutMS: 5000 // Timeout after 5s instead of hanging indefinitely
+})
   .then(() => console.log("Connected to MongoDB"))
   .catch(err => console.error("MongoDB connection error:", err));
 
@@ -51,7 +53,8 @@ const authorizeRole = (roles: string[]) => {
 // --- Auth Routes ---
 app.post("/api/auth/register", async (req, res) => {
   try {
-    const { email, password, displayName, role } = req.body;
+    const { password, displayName, role } = req.body;
+    const email = req.body.email?.trim().toLowerCase();
     const existingUser = await User.findOne({ email });
     if (existingUser) return res.status(400).json({ error: "User already registered." });
 
@@ -76,7 +79,8 @@ app.post("/api/auth/register", async (req, res) => {
 
 app.post("/api/auth/login", async (req, res) => {
   try {
-    const { email, password } = req.body;
+    const { password } = req.body;
+    const email = req.body.email?.trim().toLowerCase();
     const user = await User.findOne({ email });
     if (!user || !user.password) return res.status(400).json({ error: "Invalid email or password." });
 
